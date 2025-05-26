@@ -131,6 +131,16 @@ A patch set should include the following:
 
 Feature pull requests should target the *main* branch.
 
+### Pull request builds
+
+Each pull request is automatically built and published to the JSR and npm
+registries as a pre-release.  You can test the pull request by installing
+the pre-release version of the Fedify library.  The version number of
+the pre-release version consists of the base version number, the pull request
+number, the build number, and the commit hash, which looks like
+`1.2.3-pr.456.789+abcdef01`.  You can find the exact version number in
+the comment left by the build process in the pull request.
+
 
 Build
 -----
