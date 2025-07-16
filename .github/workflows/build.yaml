@@ -58,12 +58,11 @@ jobs:
       env:
         RUST_BACKTRACE: ${{ runner.debug }}
         LOG: ${{ runner.debug && 'always' || '' }}
-      working-directory: ${{ github.workspace }}/fedify/
     - uses: dorny/test-reporter@v2
       if: success() || failure()
       with:
         name: "Test Results (${{ matrix.os }})"
-        path: fedify/.test-report.xml
+        path: .test-report.xml
         reporter: jest-junit
       continue-on-error: true
     - if: '!cancelled()'
@@ -72,12 +71,11 @@ jobs:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: .test-report.xml
     - run: deno coverage --lcov .cov > .cov.lcov
-      working-directory: ${{ github.workspace }}/fedify/
       continue-on-error: true
     - uses: codecov/codecov-action@v5
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
-        files: fedify/.cov.lcov
+        files: .cov.lcov
       continue-on-error: true
 
   test-node:
