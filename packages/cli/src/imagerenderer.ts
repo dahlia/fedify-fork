@@ -1,5 +1,4 @@
 import { encodeBase64 } from "@std/encoding/base64";
-import sharp from "sharp";
 
 export type TerminalType = "kitty" | "iterm2" | "none";
 
@@ -114,28 +113,20 @@ export async function downloadImage(url: string): Promise<string | null> {
 export async function renderImages(
   imageUrls: URL[],
 ): Promise<void> {
-  const graphicsProtocol = await detectTerminalCapabilities();
+  const graphicsProtocol = detectTerminalCapabilities();
   for (const url of imageUrls) {
-    const tempPath = await downloadImage(url.toString());
-    if (!tempPath) {
-      continue;
-    }
-    const resizedPath = tempPath + "_resized." +
-      (tempPath.split(".").pop() || "png");
-
-    await sharp(tempPath)
-      .resize(300)
-      .toFile(resizedPath);
+    const tempPath = await downloadImage(url.href);
+    if (!tempPath) continue;
 
     console.log(""); // clear the line before rendering image
 
     if (graphicsProtocol === "kitty") {
-      await renderImageKitty(resizedPath, {
+      await renderImageKitty(tempPath, {
         a: "T",
         f: 100, // specify the image format is png
       });
     } else if (graphicsProtocol === "iterm2") {
-      await renderImageITerm2(resizedPath);
+      await renderImageITerm2(tempPath);
     } else {
       continue;
     }
