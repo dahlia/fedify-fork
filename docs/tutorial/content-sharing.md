@@ -3164,3 +3164,117 @@ images.](./content-sharing/profile-grid.png)
 
 Clicking a tile 404s for now because we haven't built the post
 detail page yet; that's the next chapter.
+
+
+Post detail page
+----------------
+
+When a visitor clicks a tile on Alice's profile, they should land
+on a full-size view of the image with the caption and a link back
+to the profile.  The Nuxt page goes at
+`app/pages/users/[username]/posts/[id].vue`, which shares a URL
+with the `Note` dispatcher from two chapters ago.  HTML responses
+render this page; ActivityPub-negotiated requests still get the
+`Note` JSON.
+
+### The Vue page
+
+Create `app/pages/users/[username]/posts/[id].vue`:
+
+~~~~ vue [app/pages/users/[username]/posts/[id].vue]
+<script setup lang="ts">
+const route = useRoute();
+const username = computed(() => route.params.username as string);
+const id = computed(() => route.params.id as string);
+const requestUrl = useRequestURL();
+
+interface PostDetail {
+  id: string;
+  imagePath: string;
+  mediaType: string;
+  caption: string;
+  createdAt: string;
+  authorUsername: string;
+  authorName: string;
+}
+
+const { data: post, error } = await useFetch<PostDetail>(
+  () => `/api/users/${username.value}/posts/${id.value}`,
+);
+
+const authorHandle = computed(() =>
+  post.value ? `@${post.value.authorUsername}@${requestUrl.host}` : "",
+);
+
+function formatPublished(sqliteText: string): string {
+  return new Date(`${sqliteText.replace(" ", "T")}Z`).toLocaleString();
+}
+</script>
+
+<template>
+  <section v-if="post" class="post-detail">
+    <nav class="crumbs">
+      <NuxtLink :to="`/users/${username}`">← Back to @{{ username }}</NuxtLink>
+    </nav>
+
+    <article class="card">
+      <figure class="image">
+        <img :src="`/${post.imagePath}`" :alt="post.caption || 'Untitled'" />
+      </figure>
+
+      <header class="author">
+        <NuxtLink :to="`/users/${post.authorUsername}`">
+          <strong>{{ post.authorName }}</strong>
+          <span class="handle">{{ authorHandle }}</span>
+        </NuxtLink>
+      </header>
+
+      <p v-if="post.caption" class="caption">{{ post.caption }}</p>
+
+      <time class="published">{{ formatPublished(post.createdAt) }}</time>
+    </article>
+  </section>
+  <section v-else-if="error" class="empty">
+    <h1>Post not found</h1>
+    <p>
+      <NuxtLink :to="`/users/${username}`">
+        Back to @{{ username }}'s profile
+      </NuxtLink>
+    </p>
+  </section>
+</template>
+
+<!-- scoped styles omitted; see the example repo for the full file. -->
+~~~~
+
+The only really new piece is the style decisions:
+
+`object-fit: contain` on the image
+:   Shows the whole image without cropping, the opposite of the
+    grid tile which `cover`-cropped to a square.
+
+`white-space: pre-wrap` on the caption
+:   The compose textarea lets users break lines; we preserve those
+    in the final render.
+
+`new Date(\`${sqliteText.replace(“ ”, “T”)}Z\`).toLocaleString()\`
+:   A tiny converter that turns `'YYYY-MM-DD HH:MM:SS'` into a
+    user-local timestamp.  A production app would lean on a
+    dedicated library (like `dayjs` or `@js-temporal/polyfill`),
+    but for a plain timestamp the built-in `Date` is fine.
+
+### Result
+
+Reload the dev server, click any tile on `/users/alice`, and you
+land on a page like this:
+
+![The post detail page showing an image, the author's handle, the
+caption, and the published
+timestamp.](./content-sharing/post-detail.png)
+
+An ActivityPub client asking for the same URL still gets the
+`Note` object thanks to `@fedify/nuxt`'s content negotiation.
+
+Everything so far is read-only.  The next chapter finally sends
+activity out: when Alice uploads a post, it should reach every
+follower's inbox.
