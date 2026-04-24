@@ -1237,3 +1237,193 @@ actual request host.
 
 But before anyone on the fediverse can follow Alice, they need to be
 able to look Alice up through ActivityPub.  That's the next chapter.
+
+
+Implementing the actor
+----------------------
+
+Everything so far has been plain Nuxt.  Starting with this chapter,
+the server finally starts speaking ActivityPub.  We'll tell Fedify
+how to look up one of our users and turn the row into an ActivityPub
+[`Person`] actor.
+
+[`Person`]: https://www.w3.org/TR/activitystreams-vocabulary/#dfn-person
+
+### One URL, two representations
+
+A Fedify-powered Nuxt app shares a single URL between two audiences:
+
+ -  Browsers that ask for HTML (`Accept: text/html`) go to the Nuxt
+    page at `app/pages/users/[username].vue` and see the profile from
+    the previous chapter.
+ -  Fediverse clients (Mastodon, Misskey, Pixelfed, or `fedify lookup`) ask for
+    `application/activity+json`, and `@fedify/nuxt` routes those requests to
+    Fedify, which turns the user into a JSON-LD actor document.
+
+The two never conflict because the `@fedify/nuxt` middleware in front
+of Nitro sniffs the `Accept` header and decides which side responds.
+This is a key reason Nuxt pairs well with Fedify: we don't have to
+carve out a separate subdomain or path prefix.
+
+### The actor dispatcher
+
+Open the generated *server/federation.ts* and replace the scaffold
+with this:
+
+~~~~ typescript [server/federation.ts]
+import {
+  createFederation,
+  InProcessMessageQueue,
+  MemoryKvStore,
+} from "@fedify/fedify";
+import { Endpoints, Person } from "@fedify/vocab";
+import { getLogger } from "@logtape/logtape";
+import { eq } from "drizzle-orm";
+import { users } from "./db/schema";
+import { db } from "./utils/db";
+
+const logger = getLogger("content-sharing");
+
+const federation = createFederation({
+  kv: new MemoryKvStore(),
+  queue: new InProcessMessageQueue(),
+});
+
+federation
+  .setActorDispatcher("/users/{identifier}", (ctx, identifier) => {
+    const user = db
+      .select()
+      .from(users)
+      .where(eq(users.username, identifier))
+      .get();
+    if (user == null) return null;
+
+    const actorUri = ctx.getActorUri(identifier);
+    return new Person({
+      id: actorUri,
+      preferredUsername: user.username,
+      name: user.name,
+      inbox: ctx.getInboxUri(identifier),
+      endpoints: new Endpoints({
+        sharedInbox: ctx.getInboxUri(),
+      }),
+      url: actorUri,
+    });
+  })
+  .mapHandle((_ctx, handle) => {
+    const user = db
+      .select()
+      .from(users)
+      .where(eq(users.username, handle))
+      .get();
+    return user == null ? null : handle;
+  });
+
+federation.setInboxListeners("/users/{identifier}/inbox", "/inbox");
+
+logger.debug("federation configured");
+
+export default federation;
+~~~~
+
+There's a lot going on in that block.  Let's walk through it.
+
+`federation.setActorDispatcher("/users/{identifier}", ...)`
+:   Tells Fedify that actors live at URIs shaped like
+    `/users/{identifier}`, the same path our Nuxt page already
+    handles.  The `{identifier}` placeholder becomes the second
+    argument of the callback, so when `/users/alice` is requested
+    with an ActivityPub `Accept` header, `identifier` is `"alice"`.
+
+`db.select().from(users).where(eq(users.username, identifier)).get()`
+:   Look the user up by username.  Returning `null` when no row
+    matches makes Fedify respond with `404 Not Found` for that actor.
+
+`ctx.getActorUri(identifier)`
+:   Builds the absolute actor URI for a given identifier on the
+    current request.  Passing the same identifier we were given makes
+    the returned `id` line up with the incoming URL.
+
+`new Person({ ... })`
+:   The ActivityStreams `Person` object.  We fill in:
+
+     -  `id`: the canonical actor URI.
+     -  `preferredUsername`: the short handle that appears in
+        `@alice@host`.
+     -  `name`: the display name.
+     -  `inbox`: where other servers POST activities for this actor.
+     -  `endpoints.sharedInbox`: an optional server-wide inbox used to
+        collapse one delivery per remote server instead of one per
+        actor.  We'll need this when delivering to large instances.
+     -  `url`: the profile URL a browser should open.  We set it to
+        the same URL as `id`; the shared-route design means an actor
+        URI is already a human-visitable profile URL.
+
+`.mapHandle((_ctx, handle) => ...)`
+:   [WebFinger] lookups arrive as a handle (`alice`, without the
+    leading `@`) and need to map back to a dispatcher `{identifier}`.
+    Because we chose to use the username as the identifier, the
+    mapping is the identity function, but we still check that the row
+    exists so a `@ghost@host` lookup returns a clean 404 instead of
+    a fake actor.
+
+`federation.setInboxListeners("/users/{identifier}/inbox", "/inbox")`
+:   Registers the per-actor inbox URI template and the server-wide
+    shared inbox URL.  We pass no handlers yet because no remote
+    server will send us an activity before we're reachable over the
+    internet.  Later chapters will chain `.on(Follow, ...)`,
+    `.on(Undo, ...)`, and friends onto this call to actually process
+    activities.  Registering the paths up front is what lets
+    `ctx.getInboxUri()` above return real URLs today.
+
+[WebFinger]: https://datatracker.ietf.org/doc/html/rfc7033
+
+### Trying the actor out
+
+With the dev server running, visit `/users/alice` in the browser.
+Nothing has changed visually; you still see Alice's profile.  Now try
+the same URL but as an ActivityPub client would:
+
+~~~~ sh
+fedify lookup http://localhost:3000/users/alice
+~~~~
+
+~~~~ console
+- Looking up the object...
+✔ Fetched object: http://localhost:3000/users/alice
+Person {
+  id: URL 'http://localhost:3000/users/alice',
+  name: 'Alice Wonderland',
+  url: URL 'http://localhost:3000/users/alice',
+  preferredUsername: 'alice',
+  inbox: URL 'http://localhost:3000/users/alice/inbox',
+  endpoints: Endpoints { sharedInbox: URL 'http://localhost:3000/inbox' }
+}
+✔ Successfully fetched the object.
+~~~~
+
+Same URL, completely different response.  `fedify lookup` asked for
+`application/activity+json`; the `@fedify/nuxt` middleware spotted
+that and routed the request to our dispatcher, which pulled Alice out
+of SQLite and returned a `Person`.
+
+If you prefer `curl` with `jq`:
+
+~~~~ sh
+curl -H 'Accept: application/activity+json' \
+  http://localhost:3000/users/alice | jq .
+~~~~
+
+And looking up an account that doesn't exist returns 404 as expected:
+
+~~~~ sh
+fedify lookup http://localhost:3000/users/nobody
+~~~~
+
+~~~~ console
+✘ Failed to fetch object.
+~~~~
+
+Alice is now discoverable locally, but real fediverse instances need
+a cryptographic identity before they'll trust our server.  That's
+what we add in the next chapter.
