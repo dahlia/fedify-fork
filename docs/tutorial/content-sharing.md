@@ -796,3 +796,260 @@ next to it.  Add the following block to *.gitignore*:
 ~~~~
 
 Now nothing in the database accidentally ends up in a commit.
+
+
+Account creation page
+---------------------
+
+The database has a shape but no rows.  Let's add a page where someone
+visiting our server for the first time can pick a username and a
+display name.  Two files carry the feature: the Vue page that shows
+the form, and the Nitro endpoint that writes the row.
+
+### The Vue page
+
+Create *app/pages/setup.vue*:
+
+~~~~ vue [app/pages/setup.vue]
+<script setup lang="ts">
+const username = ref("");
+const name = ref("");
+const error = ref<string | null>(null);
+const submitting = ref(false);
+
+async function submit() {
+  submitting.value = true;
+  error.value = null;
+  try {
+    await $fetch("/api/setup", {
+      method: "POST",
+      body: {
+        username: username.value,
+        name: name.value,
+      },
+    });
+    await navigateTo("/");
+  } catch (e: unknown) {
+    submitting.value = false;
+    const err = e as { statusMessage?: string };
+    error.value = err.statusMessage ?? "Could not set up the account.";
+  }
+}
+</script>
+
+<template>
+  <section class="setup">
+    <h1>Set up your account</h1>
+    <p>
+      Pick a username and a display name. The username appears in URLs
+      and in your fediverse handle (<code>@you@host</code>), so you
+      can't change it later.
+    </p>
+    <form class="setup-form" @submit.prevent="submit">
+      <label>
+        <span>Username</span>
+        <input
+          v-model="username"
+          required
+          pattern="[A-Za-z0-9_]+"
+          maxlength="50"
+          autocomplete="off"
+        />
+      </label>
+      <label>
+        <span>Display name</span>
+        <input v-model="name" required maxlength="100" autocomplete="off" />
+      </label>
+      <button type="submit" :disabled="submitting">
+        {{ submitting ? "Setting up…" : "Create account" }}
+      </button>
+      <p v-if="error" class="error">{{ error }}</p>
+    </form>
+  </section>
+</template>
+
+<style scoped>
+.setup h1 {
+  margin-top: 0;
+}
+
+.setup > p {
+  color: var(--color-muted);
+}
+
+.setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 320px;
+  margin-top: 1rem;
+}
+
+.setup-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+  color: var(--color-muted);
+}
+
+.setup-form input {
+  padding: 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 1rem;
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.setup-form button {
+  padding: 0.5rem 1rem;
+  background: var(--color-accent);
+  color: #fff;
+  border: 0;
+  border-radius: var(--radius);
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.setup-form button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.setup-form .error {
+  color: var(--color-accent);
+  margin: 0;
+}
+</style>
+~~~~
+
+A few things that are worth calling out:
+
+`ref(...)`
+:   Vue's primitive for reactive state.  `username`, `name`,
+    `submitting`, and `error` each hold a value that the template
+    re-reads whenever it changes.  Read and write them as `.value` in
+    script code; in the template you can use them bare.
+
+`v-model="username"`
+:   Two-way binds the `<input>` to the `username` ref.  Typing into
+    the input updates the ref, which in turn updates anything else
+    that reads it.
+
+`@submit.prevent="submit"`
+:   Catches the form's submit event, prevents the default full-page
+    reload, and calls our `submit` function.
+
+`$fetch(...)`
+:   Nuxt's wrapper around `fetch` that automatically handles JSON
+    and, on error, throws an error object that carries `statusMessage`
+    and `statusCode`.  We read `statusMessage` out of the thrown
+    object and show it to the user.
+
+`navigateTo("/")`
+:   Nuxt's programmatic navigation helper.  After the server accepts
+    the payload we bounce back to the landing page; a later chapter
+    will replace that landing page with a proper profile.
+
+The `<style scoped>` block matches the look of the landing page by
+reusing the CSS variables from the global `<style>` block in
+*app.vue* (`--color-accent`, `--color-border`, `--radius`, and so on).
+This is the reuse pattern we'll keep leaning on.
+
+### The server endpoint
+
+Now wire up the endpoint the page talks to.  Nuxt maps files in
+*server/api/* to HTTP endpoints: the filename is the path, the suffix
+before `.ts` is the method.  So *server/api/setup.post.ts* becomes
+`POST /api/setup`.
+
+Create *server/api/setup.post.ts*:
+
+~~~~ typescript [server/api/setup.post.ts]
+import { users } from "../db/schema";
+import { db } from "../utils/db";
+
+const USERNAME_PATTERN = /^[A-Za-z0-9_]+$/;
+
+export default defineEventHandler(async (event) => {
+  const body = await readBody<{ username?: string; name?: string }>(event);
+  const username = body?.username?.trim() ?? "";
+  const name = body?.name?.trim() ?? "";
+
+  if (!USERNAME_PATTERN.test(username) || username.length > 50) {
+    throw createError({
+      statusCode: 400,
+      statusMessage:
+        "Username must be 1 to 50 letters, digits, or underscores.",
+    });
+  }
+  if (name === "" || name.length > 100) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: "Display name must be 1 to 100 characters.",
+    });
+  }
+
+  try {
+    db.insert(users).values({ id: 1, username, name }).run();
+  } catch {
+    throw createError({
+      statusCode: 409,
+      statusMessage: "An account is already set up on this server.",
+    });
+  }
+
+  return { ok: true };
+});
+~~~~
+
+Notice that we do not trust the HTML `pattern` and `maxlength`
+attributes.  Those are nice for instant feedback in the browser, but
+anyone can send a request bypassing them.  The regex check and the
+length check here are the ones that actually protect the database.
+
+`db.insert(users).values({ id: 1, username, name }).run()` builds an
+`INSERT` statement and executes it synchronously.  If the row already
+exists, one of three things fires depending on what went wrong:
+
+ -  The `CHECK (id = 1)` constraint blocks any `id` other than 1 (so
+    we can't sneak a second user in by picking a different id).
+ -  The `UNIQUE` constraint on `username` blocks a second row even if
+    someone tries to insert id=1 twice.
+ -  The `PRIMARY KEY` blocks a duplicate id=1.
+
+Drizzle raises in all three cases, and we catch and translate to 409
+Conflict so the page can show the friendly message.
+
+> [!TIP]
+> Files under *server/utils/* are auto-imported by Nitro, which means
+> the `db` import in this file is technically optional.  We keep the
+> explicit import so the code reads the same as if you were running it
+> outside Nuxt.
+
+### Trying it out
+
+Reload the dev server if it's not running, then visit
+<http://localhost:3000/setup>.  An empty form greets you:
+
+![The empty /setup page.](./content-sharing/setup-empty.png)
+
+Fill it in (we'll use `alice` and “Alice Wonderland” throughout the
+rest of the tutorial; adjust to taste):
+
+![The /setup form with ‘alice’ and ‘Alice Wonderland’ typed
+in.](./content-sharing/setup-filled.png)
+
+Click *Create account* and you land back at `/`.  A new row now
+exists in the database; you can verify with `npm run db:studio` or
+with `sqlite3 content-sharing.sqlite3 'SELECT * FROM users;'`.
+
+If you go back to `/setup` and try to submit a second account, the
+server rejects it and the page shows the error returned from the API:
+
+![The /setup page showing the ‘already set up’ error after a second
+submission.](./content-sharing/setup-error.png)
+
+The account exists, but there's still no way to *see* it.  In the
+next chapter we'll add a profile page at `/users/<username>`.
