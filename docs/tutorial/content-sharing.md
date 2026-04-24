@@ -2454,3 +2454,324 @@ Look Alice up with the ActivityPub `Accept` header and you'll see a
 Mastodon and other remote servers will now render Alice's follower
 count correctly, and they'll use this collection as one of the
 delivery targets for forwarded content in the future.
+
+
+Image posts: schema and upload form
+-----------------------------------
+
+Alice can receive follows, but she has nothing to show them yet.
+This chapter adds the `posts` table, the `/compose` form, and the
+server endpoint that writes the image to disk.  The next chapter
+wires those posts into ActivityPub.
+
+### The `posts` table
+
+Extend *server/db/schema.ts*:
+
+~~~~ typescript [server/db/schema.ts]
+export const posts = sqliteTable("posts", {
+  id: text("id").primaryKey(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  imagePath: text("image_path").notNull(),
+  mediaType: text("media_type").notNull(),
+  caption: text("caption").notNull().default(""),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
+
+export type Post = typeof posts.$inferSelect;
+export type NewPost = typeof posts.$inferInsert;
+~~~~
+
+A couple of choices worth flagging:
+
+`id: text(...).primaryKey()` with UUIDs
+:   Post ids go into public URLs and into the `Note` objects we
+    publish to the fediverse.  Random UUIDs avoid leaking “how many
+    posts exist” counts and don't invite URL-walking attacks.
+
+`imagePath` stores a relative path, not a full URL
+:   We save files to `public/uploads/` and keep only the
+    `uploads/<uuid>.<ext>` fragment in the database.  That way moving
+    the server to a new hostname or tunnel URL doesn't invalidate
+    existing rows.
+
+`mediaType`
+:   Capturing the MIME type at upload time lets us send it back in
+    the `Document.mediaType` field when we publish the Note, so
+    remote servers can decide how to render or fetch the image.
+
+Apply it:
+
+~~~~ sh
+npm run db:push
+~~~~
+
+Also gitignore the runtime uploads directory so user files never
+end up in a commit:
+
+~~~~ [.gitignore]
+# Uploaded images (runtime state)
+public/uploads
+~~~~
+
+### A `/api/me` convenience endpoint
+
+Before the compose form, add a tiny endpoint that tells the client
+which account is currently set up.  With real auth you'd return the
+logged-in user here; for our single-user server, `SELECT * FROM users LIMIT 1`
+is enough.
+
+Create *server/api/me.get.ts*:
+
+~~~~ typescript [server/api/me.get.ts]
+import { users } from "../db/schema";
+import { db } from "../utils/db";
+
+export default defineEventHandler(() => {
+  const user = db.select().from(users).get();
+  if (user == null) {
+    throw createError({
+      statusCode: 404,
+      statusMessage: "No account is set up yet.",
+    });
+  }
+  return user;
+});
+~~~~
+
+### The compose page
+
+Create *app/pages/compose.vue*:
+
+~~~~ vue [app/pages/compose.vue]
+<script setup lang="ts">
+import type { User } from "~~/server/db/schema";
+
+const caption = ref("");
+const file = ref<File | null>(null);
+const previewUrl = ref<string | null>(null);
+const submitting = ref(false);
+const error = ref<string | null>(null);
+
+const { data: me, error: meError } = await useFetch<User>("/api/me");
+
+function onFileChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  file.value = input.files?.[0] ?? null;
+  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
+  previewUrl.value = file.value ? URL.createObjectURL(file.value) : null;
+}
+
+async function submit() {
+  if (file.value == null) return;
+  submitting.value = true;
+  error.value = null;
+  const form = new FormData();
+  form.append("image", file.value);
+  form.append("caption", caption.value);
+  try {
+    await $fetch("/api/posts", {
+      method: "POST",
+      body: form,
+    });
+    if (me.value != null) {
+      await navigateTo(`/users/${me.value.username}`);
+    } else {
+      await navigateTo("/");
+    }
+  } catch (e: unknown) {
+    submitting.value = false;
+    const err = e as { statusMessage?: string };
+    error.value = err.statusMessage ?? "Upload failed.";
+  }
+}
+</script>
+
+<template>
+  <section v-if="me" class="compose">
+    <h1>New post</h1>
+    <form class="compose-form" @submit.prevent="submit">
+      <label class="image-picker">
+        <span>Image</span>
+        <input
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/gif"
+          required
+          @change="onFileChange"
+        />
+      </label>
+
+      <div v-if="previewUrl" class="preview">
+        <img :src="previewUrl" alt="Selected image preview" />
+      </div>
+
+      <label>
+        <span>Caption</span>
+        <textarea
+          v-model="caption"
+          rows="3"
+          maxlength="500"
+          placeholder="Say something about this image…"
+        ></textarea>
+      </label>
+
+      <button type="submit" :disabled="submitting || file == null">
+        {{ submitting ? "Posting…" : "Post" }}
+      </button>
+      <p v-if="error" class="error">{{ error }}</p>
+    </form>
+  </section>
+  <section v-else-if="meError" class="empty">
+    <h1>No account yet</h1>
+    <p>
+      <NuxtLink to="/setup">Create an account</NuxtLink> before posting.
+    </p>
+  </section>
+</template>
+
+<!-- scoped styles omitted; see the example repo for the full file. -->
+~~~~
+
+A few new idioms:
+
+`<input type="file">` with a manual `@change` handler
+:   `v-model` can't bind directly to a `File`, so we catch the
+    `change` event and read `input.files?.[0]` into a ref.
+
+`URL.createObjectURL(file)`
+:   Turns the chosen `File` into a temporary `blob:` URL we can use
+    as the `<img src>`.  We call `URL.revokeObjectURL` when the
+    picker changes so the browser can free the underlying memory.
+
+`new FormData()` + `$fetch(..., { body: form })`
+:   `$fetch` detects `FormData` and sends it as `multipart/form-data`
+    automatically.  No need to set `Content-Type` by hand.
+
+### The upload endpoint
+
+Create *server/api/posts.post.ts*:
+
+~~~~ typescript [server/api/posts.post.ts]
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { posts } from "../db/schema";
+import { db } from "../utils/db";
+
+const ACCEPTED_MEDIA_TYPES: Record<string, string> = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+};
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+export default defineEventHandler(async (event) => {
+  const parts = await readMultipartFormData(event);
+  if (parts == null) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: "Expected a multipart form.",
+    });
+  }
+
+  const imagePart = parts.find((p) => p.name === "image");
+  const captionPart = parts.find((p) => p.name === "caption");
+  const mediaType = imagePart?.type ?? "";
+  const extension = ACCEPTED_MEDIA_TYPES[mediaType];
+
+  if (imagePart == null || imagePart.data.length === 0 || extension == null) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: "Please choose a JPEG, PNG, WebP, or GIF image.",
+    });
+  }
+  if (imagePart.data.length > MAX_IMAGE_BYTES) {
+    throw createError({
+      statusCode: 413,
+      statusMessage: "Image must be smaller than 8 MB.",
+    });
+  }
+
+  const caption = captionPart?.data.toString("utf8").trim() ?? "";
+  if (caption.length > 500) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: "Caption must be 500 characters or fewer.",
+    });
+  }
+
+  const id = randomUUID();
+  const filename = `${id}${extension}`;
+  const uploadsDir = resolve(process.cwd(), "public/uploads");
+  await mkdir(uploadsDir, { recursive: true });
+  await writeFile(resolve(uploadsDir, filename), imagePart.data);
+
+  db.insert(posts)
+    .values({
+      id,
+      userId: 1,
+      imagePath: `uploads/${filename}`,
+      mediaType,
+      caption,
+    })
+    .run();
+
+  return { id };
+});
+~~~~
+
+What it does:
+
+`readMultipartFormData(event)`
+:   Parses a `multipart/form-data` POST into an array of
+    `{ name, data, type, filename? }`.  Each field shows up as one
+    part; we pick off `image` and `caption` by name.
+
+Whitelisting the MIME type
+:   We only accept the four image formats every browser can render,
+    and use the whitelist to derive the file extension we write to
+    disk.  Blindly trusting the client's filename would let a
+    malicious upload drop a `.php` or `.html` file into our public
+    folder.
+
+Writing to `public/uploads`
+:   `public/` is served as-is by Nuxt, so writing there is the
+    simplest path to “just have a URL for this image”.  For
+    production you'd point Nitro at a dedicated uploads path
+    (so the build doesn't try to bundle uploaded files) or use an
+    object store like S3.
+
+`userId: 1`
+:   We hardcode the single user's id.  Once we add proper auth
+    later, we'd read this from the session.
+
+### Trying it out
+
+With the dev server running, sign in to your (single) account and go
+to `/compose`:
+
+![The empty compose form before choosing an
+image.](./content-sharing/compose-empty.png)
+
+Choose an image (JPEG, PNG, WebP, or GIF) and type a caption.  The
+preview appears immediately because we feed it a `blob:` URL:
+
+![The compose form with an image selected and a caption
+typed.](./content-sharing/compose-with-image.png)
+
+Click *Post*.  The page redirects back to the profile at
+`/users/<you>`, and the image is persisted in `public/uploads/`
+with a matching row in the `posts` table:
+
+~~~~ sh
+sqlite3 content-sharing.sqlite3 \
+  'SELECT id, image_path, media_type, caption FROM posts;'
+~~~~
+
+The profile page still doesn't render any images; that's the next
+chapter.
