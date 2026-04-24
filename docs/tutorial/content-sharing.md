@@ -3278,3 +3278,259 @@ An ActivityPub client asking for the same URL still gets the
 Everything so far is read-only.  The next chapter finally sends
 activity out: when Alice uploads a post, it should reach every
 follower's inbox.
+
+
+Distributing new posts to followers
+-----------------------------------
+
+Up to now an upload just lands in the database.  For the post to
+show up in every follower's timeline, the upload handler also needs
+to send a `Create(Note)` activity to each follower's inbox.  Fedify
+handles signing and retry for us; we just build the activity and
+call `ctx.sendActivity(...)`.
+
+### Making alice's profile look public
+
+Pixelfed, Misskey, and a few other servers treat remote actors as
+‘locked’ (approval-required) unless they explicitly advertise
+themselves as public.  A single `manuallyApprovesFollowers: false`
+on the `Person` is enough on Mastodon's side, but Pixelfed also
+reads `discoverable` and `indexable`.  Add all three to the actor
+dispatcher in *server/federation.ts*:
+
+~~~~ typescript [server/federation.ts]
+return new Person({
+  id: actorUri,
+  preferredUsername: user.username,
+  name: user.name,
+  inbox: ctx.getInboxUri(identifier),
+  endpoints: new Endpoints({
+    sharedInbox: ctx.getInboxUri(),
+  }),
+  followers: ctx.getFollowersUri(identifier),
+  url: actorUri,
+  manuallyApprovesFollowers: false, // [!code ++]
+  discoverable: true,                // [!code ++]
+  indexable: true,                   // [!code ++]
+  publicKey: keyPairs[0].cryptographicKey,
+  assertionMethods: keyPairs.map((kp) => kp.multikey),
+});
+~~~~
+
+Without these, Pixelfed shows Alice's profile with a ’Request
+Follow' button that never resolves, and Mastodon shows a padlock
+next to the handle.
+
+### Extracting `buildNote`
+
+The `Note` we return from the object dispatcher and the `Note` we
+attach to the outgoing `Create` should be identical.  Extract the
+construction into a helper in *server/federation.ts* so the two
+call sites can't drift apart:
+
+~~~~ typescript [server/federation.ts]
+export function buildNote(
+  ctx: {
+    getObjectUri: (
+      T: typeof Note,
+      v: { identifier: string; id: string },
+    ) => URL;
+    getActorUri: (id: string) => URL;
+    getFollowersUri: (id: string) => URL;
+    canonicalOrigin: string | URL;
+  },
+  identifier: string,
+  post: {
+    id: string;
+    imagePath: string;
+    mediaType: string;
+    caption: string;
+    createdAt: string;
+  },
+): Note {
+  const noteUri = ctx.getObjectUri(Note, { identifier, id: post.id });
+  const attachmentUrl = new URL(`/${post.imagePath}`, ctx.canonicalOrigin);
+  const content = escapeHtml(post.caption);
+  return new Note({
+    id: noteUri,
+    attributedTo: ctx.getActorUri(identifier),
+    to: PUBLIC_COLLECTION,
+    cc: ctx.getFollowersUri(identifier),
+    content: post.caption === "" ? null : `<p>${content}</p>`,
+    published: sqliteTextToTemporalInstant(post.createdAt),
+    url: noteUri,
+    attachments: [
+      new Document({
+        url: attachmentUrl,
+        mediaType: post.mediaType,
+      }),
+    ],
+  });
+}
+
+federation.setObjectDispatcher(
+  Note,
+  "/users/{identifier}/posts/{id}",
+  (ctx, { identifier, id }) => {
+    const row = db
+      .select({ post: posts, user: users })
+      .from(posts)
+      .innerJoin(users, eq(posts.userId, users.id))
+      .where(and(eq(users.username, identifier), eq(posts.id, id)))
+      .get();
+    if (row == null) return null;
+    return buildNote(ctx, identifier, row.post);
+  },
+);
+~~~~
+
+The `ctx` parameter is typed structurally with only the helpers we
+actually call, so it doesn't matter whether the caller hands us a
+full `RequestContext` (from a dispatcher) or a lightweight `Context`
+built from a URL (from an API route).
+
+### Sending from the upload endpoint
+
+Update *server/api/posts.post.ts* to send `Create(Note)` after the
+insert:
+
+~~~~ typescript [server/api/posts.post.ts]
+import { Create, PUBLIC_COLLECTION } from "@fedify/vocab";
+import { getRequestURL } from "h3";
+// ...
+import federation, { buildNote } from "../federation";
+// ...
+
+export default defineEventHandler(async (event) => {
+  // ... existing validation and file write ...
+
+  const user = db.select().from(users).get();
+  if (user == null) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: "Set up an account before posting.",
+    });
+  }
+
+  const newPost = {
+    id,
+    userId: user.id,
+    imagePath: `uploads/${filename}`,
+    mediaType,
+    caption,
+    createdAt: sqliteNow(),
+  };
+  db.insert(posts).values(newPost).run();
+
+  const origin = new URL(
+    getRequestURL(event, { xForwardedHost: true, xForwardedProto: true })
+      .origin,
+  );
+  const ctx = federation.createContext(origin, undefined);
+  const note = buildNote(ctx, user.username, newPost);
+  const createUri = new URL(
+    `#posts/${id}/create`,
+    ctx.getActorUri(user.username),
+  );
+  await ctx.sendActivity(
+    { identifier: user.username },
+    "followers",
+    new Create({
+      id: createUri,
+      actor: ctx.getActorUri(user.username),
+      to: PUBLIC_COLLECTION,
+      cc: ctx.getFollowersUri(user.username),
+      published: note.published,
+      object: note,
+    }),
+  );
+
+  return { id };
+});
+
+function sqliteNow(): string {
+  const d = new Date();
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return (
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
+    ` ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
+  );
+}
+~~~~
+
+Three new ideas to unpack:
+
+`federation.createContext(origin, undefined)`
+:   The URL-based overload of `createContext` builds a context that
+    can sign and send, but isn't tied to an incoming request.  It's
+    the right choice for actions triggered from an API route.
+
+`getRequestURL(event, { xForwardedHost, xForwardedProto })`
+:   Reads the `X-Forwarded-Host` and `X-Forwarded-Proto` headers
+    that `fedify tunnel`, `cloudflared`, and `ngrok` all set, so the
+    origin we feed into `createContext` is the public tunnel URL
+    and not `localhost`.  Without this, outgoing activities would
+    reference private URLs that remote fediverse servers refuse to
+    load.
+
+`ctx.sendActivity({ identifier }, "followers", activity)`
+:   The literal string `"followers"` tells Fedify to iterate the
+    followers collection and POST the activity to each follower's
+    inbox (or shared inbox).  Fedify signs every delivery with the
+    user's RSA key and adds an Ed25519-based Object Integrity
+    Proof; when a delivery fails the in-process queue retries it.
+
+### Testing end to end
+
+You need three terminals:
+
+~~~~ sh
+# terminal 1
+npm run dev
+
+# terminal 2: a tunnel of your choice
+fedify tunnel -s localhost.run 3000
+# or, when fedify tunnel is struggling:
+#   cloudflared tunnel --url http://localhost:3000
+#   ngrok http 3000
+
+# terminal 3: an ephemeral follower that prints every delivery
+fedify inbox -f https://<your-tunnel-host>/users/alice
+~~~~
+
+The `fedify inbox` side logs `Accept(Follow)` right away, proving
+the follower is now subscribed.  Use the tunnel URL in the browser
+(not `localhost`!) and upload a post through `/compose`.  Within a
+second the ephemeral inbox should log:
+
+~~~~ console
+╭────────────────┬──────────────────────────────────────╮
+│ Request #:     │ 1                                    │
+├────────────────┼──────────────────────────────────────┤
+│ Activity type: │ Create(Note)                         │
+├────────────────┼──────────────────────────────────────┤
+│ HTTP request:  │ POST /i/inbox                        │
+├────────────────┼──────────────────────────────────────┤
+│ HTTP response: │ 202                                  │
+├────────────────┼──────────────────────────────────────┤
+│ Details        │ https://<ephemeral-host>/r/1         │
+╰────────────────┴──────────────────────────────────────╯
+~~~~
+
+`202 Accepted` means the ephemeral actor validated the signature,
+accepted the activity for later processing, and the wrapped `Note`
+matches what our dispatcher would've served.
+
+> [!TIP]
+> Real Mastodon-family servers such as Pixelfed and Misskey also
+> accept the same delivery when Alice is reachable over HTTPS.  If
+> the post doesn't show up in a following account on one of those
+> servers, the usual culprits are: the tunnel URL rotated between
+> the follow and the post (the server cached Alice at the old URL),
+> the origin inside the activity URIs ended up as `localhost`
+> (means `X-Forwarded-Host` wasn't read; see the check above), or
+> the remote server's queue just hasn't processed the delivery yet.
+
+Posts now travel out to followers' timelines in real time.  The
+next chapter makes Alice herself follow remote accounts, which
+sets up the timeline view that comes right after.
