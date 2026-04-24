@@ -3023,3 +3023,144 @@ curl http://localhost:3000/api/users/alice/posts/<uuid> | jq .
 The post is now a fully formed fediverse object, even though it
 still isn't visible from anywhere in the UI.  We'll fix that in the
 next chapter.
+
+
+Showing posts on the profile
+----------------------------
+
+Now that `/api/users/<u>/posts` exists, the profile can render
+them.  We update the one page file we already have.
+
+### Updating `app/pages/users/[username]/index.vue`
+
+Fetch the post list alongside the user and follower count, then
+render a 3-column square grid of clickable tiles:
+
+~~~~ vue [app/pages/users/[username]/index.vue]
+<script setup lang="ts">
+import type { User } from "~~/server/db/schema";
+
+const route = useRoute();
+const username = computed(() => route.params.username as string);
+const requestUrl = useRequestURL();
+
+const { data: user, error } = await useFetch<User>(
+  () => `/api/users/${username.value}`,
+);
+
+const { data: followers } = await useFetch<{ total: number }>(
+  () => `/api/users/${username.value}/followers`,
+);
+
+interface PostItem {
+  id: string;
+  imagePath: string;
+  mediaType: string;
+  caption: string;
+  createdAt: string;
+}
+
+const { data: postsData } = await useFetch<{
+  total: number;
+  items: PostItem[];
+}>(() => `/api/users/${username.value}/posts`);
+
+const handle = computed(() =>
+  user.value ? `@${user.value.username}@${requestUrl.host}` : "",
+);
+</script>
+
+<template>
+  <section v-if="user" class="profile">
+    <header class="profile-header">
+      <h1>{{ user.name }}</h1>
+      <p class="handle">{{ handle }}</p>
+      <nav class="stats">
+        <NuxtLink :to="`/users/${username}/followers`">
+          <strong>{{ followers?.total ?? 0 }}</strong>
+          Followers
+        </NuxtLink>
+        <NuxtLink :to="`/users/${username}`">
+          <strong>{{ postsData?.total ?? 0 }}</strong>
+          Posts
+        </NuxtLink>
+      </nav>
+    </header>
+
+    <section v-if="postsData && postsData.items.length > 0" class="grid">
+      <NuxtLink
+        v-for="post in postsData.items"
+        :key="post.id"
+        :to="`/users/${username}/posts/${post.id}`"
+        class="tile"
+      >
+        <img :src="`/${post.imagePath}`" :alt="post.caption || 'Untitled'" />
+      </NuxtLink>
+    </section>
+    <p v-else class="empty-posts">
+      No posts yet.
+      <NuxtLink to="/compose">Share your first image</NuxtLink>.
+    </p>
+  </section>
+  <!-- 'User not found' branch unchanged -->
+</template>
+
+<style scoped>
+/* Previous rules plus: */
+
+.grid {
+  margin-top: 1.5rem;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.tile {
+  aspect-ratio: 1;
+  overflow: hidden;
+  background: var(--color-border);
+}
+
+.tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.2s ease-out;
+}
+
+.tile:hover img {
+  transform: scale(1.04);
+}
+
+.empty-posts {
+  margin-top: 1.5rem;
+  color: var(--color-muted);
+}
+</style>
+~~~~
+
+What's new:
+
+`aspect-ratio: 1`
+:   Each tile is a square no matter the image's native ratio.
+
+`object-fit: cover` on the `<img>`
+:   Fills the square while cropping the excess so portraits and
+    landscapes both look sharp.
+
+The `v-else` empty state
+:   If the user has no posts yet we show a single friendly line
+    directing them to the upload page.
+
+### Result
+
+Upload a couple of images through `/compose`, come back to
+`/users/alice`, and the profile shows the Posts stat plus a grid
+of tiles:
+
+![Alice's profile showing the posts grid with four
+images.](./content-sharing/profile-grid.png)
+
+Clicking a tile 404s for now because we haven't built the post
+detail page yet; that's the next chapter.
