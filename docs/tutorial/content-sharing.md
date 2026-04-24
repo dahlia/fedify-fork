@@ -1666,3 +1666,360 @@ Alice is now a fully fledged ActivityPub actor, at least as far as a
 local `fedify lookup` is concerned.  Next we'll get our server on the
 public internet so Mastodon-powered instances like ActivityPub.Academy
 can discover Alice the same way.
+
+
+Interoperating with the rest of the fediverse
+---------------------------------------------
+
+A real fediverse server lives on the open internet at a stable HTTPS
+URL.  Our dev server only listens on `localhost:3000`, so no outside
+instance can reach it.  We'll fix that with [`fedify tunnel`], which
+picks one of a handful of public tunneling services, opens a secure
+tunnel from a random HTTPS host back to our local port, and gives us
+a URL we can hand out to other instances.
+
+[`fedify tunnel`]: ../cli.md#fedify-tunnel-exposing-a-local-server-to-the-public-internet
+
+### Allowing tunnel hosts through Vite
+
+Before we open the tunnel, Vite needs one small piece of
+configuration.  Vite rejects requests whose `Host` header doesn't
+match the development server's hostname, which means the tunnel's
+random host gets blocked with *Blocked request. This host (“..”) is
+not allowed.*
+
+Edit *nuxt.config.ts* to relax that check in development:
+
+~~~~ typescript [nuxt.config.ts]
+// https://nuxt.com/docs/api/configuration/nuxt-config
+export default defineNuxtConfig({
+  modules: ["@fedify/nuxt"],
+  fedify: { federationModule: "#server/federation" },
+  ssr: true,
+  vite: {
+    server: {
+      allowedHosts: true,
+    },
+  },
+});
+~~~~
+
+`allowedHosts: true` is a development-only setting; it doesn't
+affect anything in `nuxt build` output.
+
+### Opening the tunnel
+
+With the dev server running on port 3000 (or 3001, whichever your
+copy picked), start the tunnel in a second terminal:
+
+~~~~ sh
+fedify tunnel 3000
+~~~~
+
+The command prints a URL like:
+
+~~~~ console
+- Creating a secure tunnel...
+✔ Your local server at 3000 is now publicly accessible:
+
+"https://abc123.lhr.life/"
+ Press ^C to close the tunnel.
+~~~~
+
+> [!TIP]
+> `fedify tunnel` rotates between several free services; if the one
+> it picked doesn't respond, Ctrl+C and re-run, or force a specific
+> one with `fedify tunnel -s localhost.run 3000` (options:
+> `localhost.run`, `serveo.net`, `pinggy.io`).  Tunnels can also drop
+> silently if no traffic flows for a while, so keep the command
+> visible to spot the next reconnection prompt.
+
+> [!WARNING]
+> The tunnel URL is a *random string*, regenerated each time you
+> restart the tunnel.  That means restarting the tunnel also moves
+> your actor.  Real fediverse servers remember where they found you,
+> so every restart effectively creates a new Alice from their point
+> of view.  This is fine while you're learning; just don't be
+> surprised when a follower from before a restart can't interact
+> anymore.
+
+### Looking alice up from outside
+
+Now that Alice is reachable from the internet, any ActivityPub client
+can load her actor document.  A quick smoke test from another
+terminal:
+
+~~~~ sh
+fedify lookup https://abc123.lhr.life/users/alice
+~~~~
+
+Replace `abc123.lhr.life` with whatever your tunnel prints.  The
+output matches the earlier local lookup, except the `id`, `url`,
+`inbox`, and key controller URLs now live on the public tunnel host.
+
+The same URL is what you'd paste into Mastodon's search bar (or any
+fediverse client's handle lookup).  If ActivityPub.Academy (a
+temporary-account Mastodon instance for experimenting) is up, you
+can type `@alice@<your-tunnel-host>` there and follow the actor from
+a real browser UI; we cover that interaction in the next chapter.
+
+> [!TIP]
+> If ActivityPub.Academy is unreachable at the moment, don't worry:
+> we'll also show how to exercise the same flow entirely locally with
+> [`fedify inbox`](../cli.md#fedify-inbox-running-an-ephemeral-inbox-server),
+> which spins up an ephemeral Mastodon-compatible actor on yet another
+> tunnel for a few minutes.
+
+
+Inbox: receiving follow activities
+----------------------------------
+
+With Alice publicly reachable and signed, the next step is to accept
+follow requests.  When a remote user clicks *Follow* on Alice, their
+server POSTs a `Follow` activity to Alice's inbox; we need to:
+
+1.  Save who the follower is, so Alice can show them on the profile
+    and deliver posts to them later.
+2.  Reply with an `Accept(Follow)` so the follower's server marks the
+    relationship as active.
+
+### Remembering followers
+
+We'll record follows in a new `follows` table.  Each row caches a
+few things about the follower we'll need repeatedly (their handle,
+display name, inbox URL, shared-inbox URL) so the followers list and
+the outbox delivery path don't have to re-fetch the remote actor on
+every request.
+
+Extend *server/db/schema.ts*:
+
+~~~~ typescript twoslash [server/db/schema.ts]
+import { sql } from "drizzle-orm";
+import {
+  check,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+} from "drizzle-orm/sqlite-core";
+
+export const users = sqliteTable(
+  "users",
+  {
+    id: integer("id").primaryKey({ autoIncrement: false }),
+    username: text("username").notNull().unique(),
+    name: text("name").notNull(),
+  },
+  (table) => [check("single_user", sql`${table.id} = 1`)],
+);
+
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+
+export const keys = sqliteTable(
+  "keys",
+  {
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: text("type", { enum: ["RSASSA-PKCS1-v1_5", "Ed25519"] }).notNull(),
+    privateKey: text("private_key").notNull(),
+    publicKey: text("public_key").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.type] })],
+);
+
+export type Key = typeof keys.$inferSelect;
+
+export const follows = sqliteTable(
+  "follows",
+  {
+    followingUserId: integer("following_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    followerUri: text("follower_uri").notNull(),
+    followerHandle: text("follower_handle").notNull(),
+    followerName: text("follower_name"),
+    followerInbox: text("follower_inbox").notNull(),
+    followerSharedInbox: text("follower_shared_inbox"),
+    acceptedAt: text("accepted_at")
+      .notNull()
+      .default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.followingUserId, table.followerUri] }),
+  ],
+);
+
+export type FollowRow = typeof follows.$inferSelect;
+~~~~
+
+A few notes on the schema:
+
+ -  `(followingUserId, followerUri)` is the composite primary key, so
+    the same remote actor can't be recorded as following Alice twice.
+ -  `followerInbox` is the URL we POST activities to later; caching
+    it means `npm run dev` doesn't re-fetch the actor on every
+    delivery.
+ -  `followerSharedInbox` is optional because older servers don't
+    advertise one; when it's present we can collapse many per-actor
+    deliveries into one POST.
+ -  The row type is exported as `FollowRow` so it doesn't collide
+    with the `Follow` activity class we import from `@fedify/vocab` in
+    *server/federation.ts*.
+
+Run `npm run db:push` to create the new table.
+
+### Handling the follow activity
+
+Now extend *server/federation.ts* with a `Follow` handler:
+
+~~~~ typescript [server/federation.ts]
+// ...
+import {
+  createFederation,
+  exportJwk,
+  generateCryptoKeyPair,
+  importJwk,
+  InProcessMessageQueue,
+  MemoryKvStore,
+} from "@fedify/fedify";
+import { Accept, Endpoints, Follow, Person } from "@fedify/vocab"; // [!code highlight]
+import { getLogger } from "@logtape/logtape";
+import { and, eq } from "drizzle-orm";
+import { follows, keys, users } from "./db/schema"; // [!code highlight]
+import { db } from "./utils/db";
+// ...
+
+federation
+  .setInboxListeners("/users/{identifier}/inbox", "/inbox")
+  .on(Follow, async (ctx, follow) => {
+    if (follow.id == null || follow.actorId == null || follow.objectId == null) {
+      return;
+    }
+    const parsed = ctx.parseUri(follow.objectId);
+    if (parsed?.type !== "actor") return;
+    const identifier = parsed.identifier;
+    const user = db
+      .select()
+      .from(users)
+      .where(eq(users.username, identifier))
+      .get();
+    if (user == null) return;
+
+    const follower = await follow.getActor(ctx);
+    if (follower == null || follower.id == null || follower.inboxId == null) {
+      return;
+    }
+    logger.info("{follower} followed {identifier}", {
+      follower: follower.id.href,
+      identifier,
+    });
+
+    const followerHandle =
+      `@${follower.preferredUsername}@${follower.id.host}`;
+    db.insert(follows)
+      .values({
+        followingUserId: user.id,
+        followerUri: follower.id.href,
+        followerHandle,
+        followerName: follower.name?.toString() ?? null,
+        followerInbox: follower.inboxId.href,
+        followerSharedInbox: follower.endpoints?.sharedInbox?.href ?? null,
+      })
+      .onConflictDoNothing()
+      .run();
+
+    await ctx.sendActivity(
+      { identifier },
+      follower,
+      new Accept({
+        id: new URL(
+          `#accepts/${crypto.randomUUID()}`,
+          ctx.getActorUri(identifier),
+        ),
+        actor: ctx.getActorUri(identifier),
+        object: follow,
+      }),
+    );
+  });
+~~~~
+
+The handler flow:
+
+ -  `follow.id`, `follow.actorId`, and `follow.objectId` guards drop
+    malformed activities with missing required fields.  Treating
+    those as no-ops avoids echoing the error back to the sender.
+ -  `ctx.parseUri(follow.objectId)` checks that the `object` URI
+    points at one of our actors; we ignore follows directed at a
+    URL that doesn't belong to our `setActorDispatcher` path.
+ -  `follow.getActor(ctx)` fetches the remote actor document.
+    Fedify caches the result in the KV store, so repeated follows
+    by the same actor won't refetch on every delivery.
+ -  The `insert(...).onConflictDoNothing()` chain makes the handler
+    idempotent: if the same Follow is redelivered (networks retry
+    freely), we don't add a duplicate row or re-send the Accept.
+ -  `ctx.sendActivity({ identifier }, follower, new Accept({ ... }))`
+    signs and enqueues an `Accept(Follow)` to the follower's inbox.
+    The identifier argument tells Fedify which actor (and which of
+    its key pairs) to sign with.  We give the Accept a stable
+    fragment id anchored under Alice's actor URI so Mastodon's
+    stricter verifier accepts it.
+
+### Testing with ActivityPub.Academy (or `fedify inbox`)
+
+With the dev server and the tunnel both running, it's time to send a
+real follow request.  The simplest way is to sign up for a throwaway
+account on [ActivityPub.Academy], search for Alice's handle there,
+and click *Follow*.  Academy is a Mastodon fork that also shows an
+*Activity Log* of everything its account has sent and received,
+which is perfect for seeing the exact JSON at each step.
+
+![The follow button on Academy's view of Alice, before
+clicking.](./content-sharing/ephemeral-inbox-list.png)
+
+> [!TIP]
+> Academy tends to be flaky because it's a community-run demo
+> instance.  If `https://activitypub.academy/` returns a 5xx error,
+> use [`fedify inbox`](../cli.md#fedify-inbox-running-an-ephemeral-inbox-server)
+> instead.  That command spins up an ephemeral actor on its own
+> tunnel and can send a follow on startup:
+>
+> ~~~~ sh
+> fedify inbox -f https://<your-tunnel-host>/users/alice
+> ~~~~
+>
+> The command prints its own handle, and keeps a web UI running at
+> the tunnel URL that shows every activity it received.
+
+Whichever you use, open Alice's database (`npm run db:studio`, or
+`sqlite3 content-sharing.sqlite3 'SELECT * FROM follows;'`).  The
+Follow handler should have inserted a row pointing at the remote
+actor:
+
+~~~~ console
+following_user_id  follower_uri                                 followerHandle              ...
+1                  https://873d7589e9cb68.lhr.life/i            @i@873d7589e9cb68.lhr.life  ...
+~~~~
+
+And on the remote side you'll see the `Accept(Follow)` we sent
+back, addressed to Alice's actor URI:
+
+![The ephemeral inbox's view of the Accept(Follow) Alice sent in
+response to the Follow.](./content-sharing/ephemeral-inbox-accept.png)
+
+`202 Accepted` on the remote inbox means our signed delivery
+worked.  From this moment on, the remote server considers itself an
+accepted follower of Alice, and it will deliver the `Create(Note)`
+activities we send to its inbox.  We just don't publish any yet.
+
+> [!NOTE]
+> Fedify signs the Accept with whichever key pair the remote server
+> advertises support for: an HTTP Signature header with our RSA key,
+> and a Data Integrity Proof with our Ed25519 key.  Every subsequent
+> delivery will reuse the same pairs without any extra work from us.
+
+Next chapter we'll handle the reverse direction: when the remote
+actor unfollows Alice.
+
+[ActivityPub.Academy]: https://activitypub.academy/
