@@ -583,3 +583,216 @@ in each step stays small and readable.
 > while following along; the snippets are pre-formatted.  If you do
 > want to reformat later, run `npx biome check --write .` at the root
 > of the project.
+
+
+Setting up the database
+-----------------------
+
+Our app needs a place to put accounts, follows, posts, comments, and
+likes.  We'll use [SQLite] because it's a single file (nothing to
+install, nothing to configure), and [Drizzle ORM] because it lets us
+describe the schema as TypeScript and gives every query a precise row
+type without having to learn a query builder's DSL.
+
+[SQLite]: https://sqlite.org/
+[Drizzle ORM]: https://orm.drizzle.team/
+
+### Installing the packages
+
+Install the runtime packages and Drizzle's CLI (drizzle-kit) at once:
+
+~~~~ sh
+npm install drizzle-orm better-sqlite3
+npm install -D drizzle-kit @types/better-sqlite3
+~~~~
+
+What each of these does:
+
+`drizzle-orm`
+:   The Drizzle runtime.  We'll use it to build queries in TypeScript.
+
+`better-sqlite3`
+:   A synchronous SQLite driver for Node.js.  Drizzle can drive a few
+    different SQLite clients; `better-sqlite3` is the most common.
+
+`drizzle-kit`
+:   The Drizzle CLI.  It reads our schema file, compares it to the
+    database, and pushes any differences as SQL.  Keeping it as a dev
+    dependency means it doesn't ship to production.
+
+`@types/better-sqlite3`
+:   TypeScript type definitions for `better-sqlite3`, which it doesn't
+    bundle itself.  Without this, TypeScript would flag imports from
+    `better-sqlite3` as having no type information.
+
+### The schema
+
+Create *server/db/schema.ts*:
+
+~~~~ typescript twoslash [server/db/schema.ts]
+import { sql } from "drizzle-orm";
+import { check, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const users = sqliteTable(
+  "users",
+  {
+    id: integer("id").primaryKey({ autoIncrement: false }),
+    username: text("username").notNull().unique(),
+    name: text("name").notNull(),
+  },
+  (table) => [check("single_user", sql`${table.id} = 1`)],
+);
+
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+~~~~
+
+`sqliteTable("users", columns, ...)` declares a table called `users`
+with three columns and a constraint.  Each column is a small builder
+chain:
+
+`id: integer("id").primaryKey({ autoIncrement: false })`
+:   An integer primary key that we'll assign ourselves.  We don't want
+    auto-increment because we'll always set `id = 1`.
+
+`username: text("username").notNull().unique()`
+:   A non-null, unique text column for the account handle that appears
+    in URLs (for example `/users/alice`).
+
+`name: text("name").notNull()`
+:   The display name that shows up in the profile header; can be any
+    non-empty string.
+
+The third argument is a callback that returns table-level constraints.
+We use Drizzle's `check()` helper to add `CHECK (id = 1)` to the
+generated SQL.  In plain English: SQLite will refuse any row whose
+`id` isn't `1`, which means the table can hold at most one row, which
+means our server can host at most one account.  It's a cheap way to
+enforce our “single user” rule at the database level, so no amount of
+buggy application code can sneak a second user in.
+
+The last two lines expose two TypeScript types:
+
+`User`
+:   The shape of a row read from the table (all columns).
+
+`NewUser`
+:   The shape of a row we'd `insert`.
+
+We'll use both in later chapters.  The nice thing is that if we change
+the schema, both types update automatically; there's no second source
+of truth.
+
+> [!TIP]
+> Hover over `users` in Visual Studio Code and you'll see the inferred
+> table type.  Drizzle's types are worth the price of admission on
+> their own.
+
+### The database connection
+
+Create *server/utils/db.ts*:
+
+~~~~ typescript [server/utils/db.ts]
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import * as schema from "../db/schema";
+
+const sqlite = new Database("content-sharing.sqlite3");
+sqlite.pragma("journal_mode = WAL");
+sqlite.pragma("foreign_keys = ON");
+
+export const db = drizzle(sqlite, { schema });
+~~~~
+
+The pragmas are SQLite tuning knobs we set once per connection:
+
+`journal_mode = WAL`
+:   Puts SQLite into Write-Ahead Logging mode, where readers can
+    continue reading while the writer commits.  This matters as soon
+    as Fedify's outbox worker and Nuxt's request handlers both touch
+    the database at the same time.
+
+`foreign_keys = ON`
+:   SQLite doesn't enforce foreign key constraints by default; turning
+    it on means that our future `follows`, `posts`, and `comments`
+    tables will reject rows that point at missing parents.
+
+`drizzle(sqlite, { schema })` wraps the `better-sqlite3` connection in
+a Drizzle client and tells it about our schema.  Every server module
+that needs to hit the database just imports this `db`.
+
+> [!TIP]
+> Put database-wide helpers like `db` under *server/utils/* instead of
+> *server/api/*.  Files in *server/api/* become HTTP endpoints, while
+> *server/utils/* is plain importable code.
+
+### The drizzle-kit config
+
+Finally, tell `drizzle-kit` where the schema is and which database to
+connect to.  Create *drizzle.config.ts* at the project root:
+
+~~~~ typescript [drizzle.config.ts]
+import { defineConfig } from "drizzle-kit";
+
+export default defineConfig({
+  schema: "./server/db/schema.ts",
+  out: "./server/db/migrations",
+  dialect: "sqlite",
+  dbCredentials: {
+    url: "content-sharing.sqlite3",
+  },
+});
+~~~~
+
+And add two shortcuts to *package.json*:
+
+~~~~ json [package.json]
+{
+  "scripts": {
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  }
+}
+~~~~
+
+### Creating the database
+
+With the config in place, ask drizzle-kit to create a fresh
+*content-sharing.sqlite3* file matching the schema:
+
+~~~~ sh
+npm run db:push
+~~~~
+
+You should see something like:
+
+~~~~ console
+[✓] Pulling schema from database...
+[✓] Changes applied
+~~~~
+
+A new *content-sharing.sqlite3* appears at the project root.  It
+contains one table (`users`) and nothing else for now.  Every time we
+add to *schema.ts*, running `npm run db:push` again diffs the schema
+against the existing database and applies just what's changed.
+
+> [!TIP]
+> Not interested in what Drizzle generated?  Run `npm run db:studio`
+> to open a tiny web UI for browsing rows and schema.  It's a handy
+> substitute for the `sqlite3` CLI.
+
+### Gitignoring the database file
+
+The SQLite file is local development state, not source code, and so
+are the `-journal`, `-wal`, and `-shm` files SQLite sometimes leaves
+next to it.  Add the following block to *.gitignore*:
+
+~~~~ [.gitignore]
+# Local database
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+~~~~
+
+Now nothing in the database accidentally ends up in a commit.
