@@ -1427,3 +1427,242 @@ fedify lookup http://localhost:3000/users/nobody
 Alice is now discoverable locally, but real fediverse instances need
 a cryptographic identity before they'll trust our server.  That's
 what we add in the next chapter.
+
+
+Cryptographic key pairs
+-----------------------
+
+Up until now the actor document has been unsigned.  To actually
+deliver activities, every request we send has to be signed, and every
+object we publish has to carry an integrity proof.  Both of those
+require a private key whose matching public key is advertised on the
+actor.  Fediverse servers currently use two signing schemes:
+
+ -  **HTTP Signatures** (FEP-521a), using an RSA key pair.  This is
+    what Mastodon verifies on every inbound delivery.
+ -  **Object Integrity Proofs** (FEP-8b32), using an Ed25519 key pair.
+    This is the newer, more compact signature that forwarded objects
+    carry.
+
+We want to support both, so each account has two key pairs.
+
+### Storing the keys
+
+Add a `keys` table that keys off `user_id` plus the algorithm name.
+Open *server/db/schema.ts* and extend it:
+
+~~~~ typescript twoslash [server/db/schema.ts]
+import { sql } from "drizzle-orm";
+import {
+  check,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+} from "drizzle-orm/sqlite-core";
+
+export const users = sqliteTable(
+  "users",
+  {
+    id: integer("id").primaryKey({ autoIncrement: false }),
+    username: text("username").notNull().unique(),
+    name: text("name").notNull(),
+  },
+  (table) => [check("single_user", sql`${table.id} = 1`)],
+);
+
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+
+export const keys = sqliteTable(
+  "keys",
+  {
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: text("type", { enum: ["RSASSA-PKCS1-v1_5", "Ed25519"] }).notNull(),
+    privateKey: text("private_key").notNull(),
+    publicKey: text("public_key").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.type] })],
+);
+
+export type Key = typeof keys.$inferSelect;
+~~~~
+
+What's new:
+
+ -  `userId` is a foreign key into `users.id`.  `onDelete: "cascade"`
+    means if we ever delete the user, SQLite drops their keys too.
+ -  `type` is constrained to the two algorithm names Fedify knows how
+    to generate.  Drizzle's enum column keeps the TypeScript type
+    tight.
+ -  Both keys are stored as JSON strings of a
+    [JSON Web Key][JWK]; we serialize on write with `exportJwk` and
+    parse back on read with `importJwk`.  JWK is a compact, standard
+    way to store keys.
+ -  `primaryKey({ columns: [userId, type] })` makes `(user_id, type)`
+    a composite primary key so each user has at most one row per
+    algorithm.
+
+Apply the migration:
+
+~~~~ sh
+npm run db:push
+~~~~
+
+[JWK]: https://datatracker.ietf.org/doc/html/rfc7517
+
+### Generating and serving the keys
+
+Now rewrite *server/federation.ts* to generate the key pairs on
+demand and advertise them on the actor:
+
+~~~~ typescript [server/federation.ts]
+import {
+  createFederation,
+  exportJwk,
+  generateCryptoKeyPair,
+  importJwk,
+  InProcessMessageQueue,
+  MemoryKvStore,
+} from "@fedify/fedify";
+import { Endpoints, Person } from "@fedify/vocab";
+import { getLogger } from "@logtape/logtape";
+import { and, eq } from "drizzle-orm";
+import { keys, users } from "./db/schema";
+import { db } from "./utils/db";
+
+const logger = getLogger("content-sharing");
+
+const federation = createFederation({
+  kv: new MemoryKvStore(),
+  queue: new InProcessMessageQueue(),
+});
+
+federation
+  .setActorDispatcher("/users/{identifier}", async (ctx, identifier) => {
+    const user = db
+      .select()
+      .from(users)
+      .where(eq(users.username, identifier))
+      .get();
+    if (user == null) return null;
+
+    const actorUri = ctx.getActorUri(identifier);
+    const keyPairs = await ctx.getActorKeyPairs(identifier);
+    return new Person({
+      id: actorUri,
+      preferredUsername: user.username,
+      name: user.name,
+      inbox: ctx.getInboxUri(identifier),
+      endpoints: new Endpoints({
+        sharedInbox: ctx.getInboxUri(),
+      }),
+      url: actorUri,
+      publicKey: keyPairs[0].cryptographicKey,
+      assertionMethods: keyPairs.map((kp) => kp.multikey),
+    });
+  })
+  .mapHandle((_ctx, handle) => {
+    const user = db
+      .select()
+      .from(users)
+      .where(eq(users.username, handle))
+      .get();
+    return user == null ? null : handle;
+  })
+  .setKeyPairsDispatcher(async (_ctx, identifier) => {
+    const user = db
+      .select()
+      .from(users)
+      .where(eq(users.username, identifier))
+      .get();
+    if (user == null) return [];
+
+    const result: CryptoKeyPair[] = [];
+    for (const type of ["RSASSA-PKCS1-v1_5", "Ed25519"] as const) {
+      const row = db
+        .select()
+        .from(keys)
+        .where(and(eq(keys.userId, user.id), eq(keys.type, type)))
+        .get();
+      if (row == null) {
+        logger.debug("generating {type} key pair for {username}", {
+          type,
+          username: user.username,
+        });
+        const pair = await generateCryptoKeyPair(type);
+        db.insert(keys)
+          .values({
+            userId: user.id,
+            type,
+            privateKey: JSON.stringify(await exportJwk(pair.privateKey)),
+            publicKey: JSON.stringify(await exportJwk(pair.publicKey)),
+          })
+          .run();
+        result.push(pair);
+      } else {
+        result.push({
+          privateKey: await importJwk(JSON.parse(row.privateKey), "private"),
+          publicKey: await importJwk(JSON.parse(row.publicKey), "public"),
+        });
+      }
+    }
+    return result;
+  });
+
+federation.setInboxListeners("/users/{identifier}/inbox", "/inbox");
+
+logger.debug("federation configured");
+
+export default federation;
+~~~~
+
+Three new pieces:
+
+`setKeyPairsDispatcher(...)`
+:   Fedify calls this whenever it needs to sign something on an
+    actor's behalf.  For each algorithm it doesn't yet have, we call
+    `generateCryptoKeyPair(type)`, which returns a native `CryptoKeyPair`,
+    then `exportJwk(...)` to turn each half into a JWK for storage.
+    On subsequent calls we `importJwk(...)` the rows back into
+    `CryptoKey` objects.  The two-algorithm loop keeps the code
+    symmetrical and keeps the order stable.
+
+`ctx.getActorKeyPairs(identifier)`
+:   Inside the actor dispatcher we ask Fedify for the key pairs it's
+    about to advertise.  This resolves through the dispatcher above,
+    so it both generates missing keys and returns `ActorKeyPair`
+    objects that already know their key IDs.
+
+`publicKey` and `assertionMethods` on `Person`
+:   `publicKey` is the classic single “main key” field.  We pass the
+    RSA pair's `cryptographicKey`, because that's what HTTP Signature
+    verifiers look for.  `assertionMethods` is the newer Multikey
+    array, and we include every pair's `multikey` so FEP-8b32
+    verifiers can pick the one they support.
+
+### Checking the result
+
+Restart the dev server (if you had it running, it probably
+hot-reloaded already) and look Alice up again:
+
+~~~~ sh
+fedify lookup http://localhost:3000/users/alice
+~~~~
+
+You should now see a `publicKey` block and an `assertionMethod` array
+(with one `Multikey` per algorithm) in the response.  Those two
+fields are the cryptographic identity the rest of the fediverse will
+verify when we start signing activities.
+
+> [!NOTE]
+> The first look-up is slightly slower because Fedify generates both
+> key pairs and writes them to SQLite.  Subsequent requests reuse the
+> stored pairs, so they're instant.
+
+Alice is now a fully fledged ActivityPub actor, at least as far as a
+local `fedify lookup` is concerned.  Next we'll get our server on the
+public internet so Mastodon-powered instances like ActivityPub.Academy
+can discover Alice the same way.
