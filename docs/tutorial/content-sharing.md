@@ -2023,3 +2023,120 @@ Next chapter we'll handle the reverse direction: when the remote
 actor unfollows Alice.
 
 [ActivityPub.Academy]: https://activitypub.academy/
+
+
+Unfollow: handling undo(follow)
+-------------------------------
+
+When a user clicks *Unfollow* on Alice, their server sends us an
+`Undo` activity whose `object` is the original `Follow`.  We need
+to notice that, look up the corresponding row in our `follows`
+table, and delete it.
+
+### The undo handler
+
+Chain a new `.on(Undo, ...)` onto the existing inbox listeners in
+*server/federation.ts*:
+
+~~~~ typescript [server/federation.ts]
+import { Accept, Endpoints, Follow, Person, Undo } from "@fedify/vocab"; // [!code highlight]
+// ...
+
+federation
+  .setInboxListeners("/users/{identifier}/inbox", "/inbox")
+  .on(Follow, async (ctx, follow) => {
+    // (unchanged)
+  })
+  .on(Undo, async (ctx, undo) => {
+    const object = await undo.getObject(ctx);
+    if (!(object instanceof Follow)) return;
+    if (object.objectId == null || undo.actorId == null) return;
+
+    const parsed = ctx.parseUri(object.objectId);
+    if (parsed?.type !== "actor") return;
+    const user = db
+      .select()
+      .from(users)
+      .where(eq(users.username, parsed.identifier))
+      .get();
+    if (user == null) return;
+
+    const deleted = db
+      .delete(follows)
+      .where(
+        and(
+          eq(follows.followingUserId, user.id),
+          eq(follows.followerUri, undo.actorId.href),
+        ),
+      )
+      .returning()
+      .all();
+    if (deleted.length > 0) {
+      logger.info("{follower} unfollowed {identifier}", {
+        follower: undo.actorId.href,
+        identifier: parsed.identifier,
+      });
+    }
+  });
+~~~~
+
+Step by step:
+
+`undo.getObject(ctx)`
+:   Loads the activity that the `Undo` wraps.  This might be a
+    `Follow`, a `Like`, an `Announce`, or anything else a remote
+    server wanted to retract.
+
+`if (!(object instanceof Follow)) return`
+:   Restricts this handler to undoing follows.  Undoing likes lands
+    in a different handler later.
+
+`object.objectId` and `undo.actorId` null checks
+:   Same defensive style as the `Follow` handler; reject malformed
+    activities silently rather than erroring back to the sender.
+
+`ctx.parseUri(object.objectId)` + `users` lookup
+:   Makes sure the original Follow was aimed at one of our actors.
+    If somebody forwards a stray Undo directed at a URL we don't
+    own, we ignore it.
+
+`.returning().all()`
+:   Drizzle's SQLite driver lets us both execute the delete and
+    read back the rows it removed in one statement.  Checking
+    `deleted.length > 0` lets us log only when we actually removed
+    something.
+
+### Why match on the sender, not on the inner follow's id?
+
+Different ActivityPub implementations generate Follow ids in
+different ways.  Some stick the random part at the end of the path,
+others use query strings, and some re-use the same id when a
+follow-then-unfollow loop happens quickly.  Matching on
+`(followingUserId, followerUri)` is more robust: regardless of what
+the Follow looked like, the Undo can only be sent by the same
+remote actor, and Fedify has already verified that actor's HTTP
+signature before calling our handler.
+
+### Testing the unfollow path
+
+The cleanest way to exercise this path is the Mastodon UI: on the
+account you followed Alice from, hover *Following* and click
+*Unfollow*.  Mastodon sends `Undo(Follow)`, and our handler removes
+the row:
+
+~~~~ sh
+sqlite3 content-sharing.sqlite3 'SELECT * FROM follows;'
+~~~~
+
+An empty result means the Undo was processed.
+
+> [!NOTE]
+> `fedify inbox` sends `Delete(Application)` on shutdown rather
+> than `Undo(Follow)`, which is a different activity that our
+> handler doesn't touch.  To test Undo locally you need a fediverse
+> client that actually implements unfollow, such as Mastodon,
+> Misskey, or GoToSocial.
+
+With follow and unfollow both handled, the `follows` table is
+finally useful.  The next chapter surfaces it on a public followers
+page.
