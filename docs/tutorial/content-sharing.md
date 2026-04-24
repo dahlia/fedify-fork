@@ -1053,3 +1053,187 @@ submission.](./content-sharing/setup-error.png)
 
 The account exists, but there's still no way to *see* it.  In the
 next chapter we'll add a profile page at `/users/<username>`.
+
+
+Profile page
+------------
+
+The account exists, but visiting <http://localhost:3000/users/alice>
+still shows a 404.  Let's add the profile page at that URL.  Once
+again we'll split it into a page and a tiny API endpoint that reads
+the user row.
+
+Why split it?  We'll need to read the same user row from a couple of
+other places soon (the actor dispatcher in the next chapter, for
+example).  Putting the query in an endpoint means there's one
+implementation of “look up a user by username”; the page just calls
+`useFetch`.
+
+### The API endpoint
+
+Files in *server/api/* can use square brackets in their filename to
+mark dynamic segments.  `server/api/users/[username].get.ts` becomes
+`GET /api/users/<whatever>`; Nitro extracts `username` and hands it to
+our handler via `getRouterParam`.
+
+Create the file `server/api/users/[username].get.ts`:
+
+~~~~ typescript [server/api/users/[username].get.ts]
+import { eq } from "drizzle-orm";
+import { users } from "../../db/schema";
+import { db } from "../../utils/db";
+
+export default defineEventHandler((event) => {
+  const username = getRouterParam(event, "username");
+  if (username == null) {
+    throw createError({ statusCode: 400, statusMessage: "Missing username." });
+  }
+  const user = db
+    .select()
+    .from(users)
+    .where(eq(users.username, username))
+    .get();
+  if (user == null) {
+    throw createError({ statusCode: 404, statusMessage: "User not found." });
+  }
+  return user;
+});
+~~~~
+
+`db.select().from(users).where(eq(users.username, username))` is the
+Drizzle equivalent of `SELECT * FROM users WHERE username = ?`.
+`.get()` returns a single row (or `undefined` if nothing matches).
+
+> [!TIP]
+> Drizzle's `eq`, `and`, `or`, `sql`, etc. are type-safe builders; if
+> you misspell a column name, `tsc` catches it.  Once you've written
+> a few queries you'll notice the IDE autocomplete is impressively
+> accurate.
+
+### The Vue page
+
+Nuxt page files mirror the same convention: `app/pages/users/[username].vue`
+becomes `/users/<anything>`, with `username` available on the route
+params.
+
+Create the file `app/pages/users/[username].vue`:
+
+~~~~ vue [app/pages/users/[username].vue]
+<script setup lang="ts">
+import type { User } from "~~/server/db/schema";
+
+const route = useRoute();
+const username = computed(() => route.params.username as string);
+const requestUrl = useRequestURL();
+
+const { data: user, error } = await useFetch<User>(
+  () => `/api/users/${username.value}`,
+);
+
+const handle = computed(() =>
+  user.value ? `@${user.value.username}@${requestUrl.host}` : "",
+);
+</script>
+
+<template>
+  <section v-if="user" class="profile">
+    <header class="profile-header">
+      <h1>{{ user.name }}</h1>
+      <p class="handle">{{ handle }}</p>
+    </header>
+  </section>
+  <section v-else-if="error" class="empty">
+    <h1>User not found</h1>
+    <p>No account named <code>{{ username }}</code> exists on this server.</p>
+  </section>
+</template>
+
+<style scoped>
+.profile-header h1 {
+  margin: 0;
+}
+
+.handle {
+  margin: 0.25rem 0 0;
+  color: var(--color-muted);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.95rem;
+}
+
+.empty h1 {
+  margin-top: 0;
+}
+
+.empty code {
+  background: var(--color-surface);
+  padding: 0.1rem 0.3rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+}
+</style>
+~~~~
+
+Breaking that down:
+
+`import type { User } from "~~/server/db/schema"`
+:   Pulls in the row type Drizzle inferred for us in the previous
+    chapter.  `~~/` is Nuxt's alias for the project root, so this
+    resolves to *server/db/schema.ts*.  The `import type` keeps this
+    import types-only; no server code ends up bundled into the browser
+    script.
+
+`useRoute()`, `useRequestURL()`
+:   Nuxt composables.  `useRoute()` gives us route params; we cast
+    `route.params.username` to `string` because Vue Router types it
+    more permissively than we need.  `useRequestURL()` returns a
+    `URL`-shaped object representing the incoming request; in SSR
+    that's the real URL the browser asked for, on the client it's
+    derived from `window.location`.
+
+`useFetch<User>(...)`
+:   A data-fetching composable that runs on the server during SSR
+    and, when the page hydrates in the browser, reuses the payload.
+    If the endpoint throws, the `error` ref becomes populated instead
+    of `data`.  The `<User>` generic lines our page's view of the
+    response up with what the API returns.
+
+`computed(() => ...)`
+:   Vue's derived state.  `handle` re-evaluates whenever `user` or
+    `requestUrl.host` change, which will matter later when we hit the
+    same page with different `username` route params.
+
+`v-if`, `v-else-if`
+:   Template conditionals.  When the fetch succeeds we show the
+    profile header; when it errors we show the ‘not found’ state.
+    There's no explicit loading state because with SSR the data is
+    already resolved before the template renders.
+
+### Trying it out
+
+With the dev server still running, visit the URL matching the account
+we created:
+
+<http://localhost:3000/users/alice>
+
+The profile header appears with the display name and the fediverse
+handle, built from the host in the current URL:
+
+![The /users/alice profile page showing ‘Alice Wonderland’ and the
+handle @alice@localhost:3000.](./content-sharing/profile-basic.png)
+
+Try a nonexistent username to exercise the 404 path:
+
+<http://localhost:3000/users/nobody>
+
+![The ‘User not found’ state on
+/users/nobody.](./content-sharing/profile-not-found.png)
+
+The handle on the real profile still shows `@alice@localhost:3000`,
+which is technically true but useless to the rest of the fediverse:
+nobody outside this machine can resolve that hostname.  In a later
+chapter we'll run `fedify tunnel` to get a public URL, and the handle
+will update itself automatically because `useRequestURL()` reads the
+actual request host.
+
+But before anyone on the fediverse can follow Alice, they need to be
+able to look Alice up through ActivityPub.  That's the next chapter.
