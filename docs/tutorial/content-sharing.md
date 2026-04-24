@@ -3534,3 +3534,1573 @@ matches what our dispatcher would've served.
 Posts now travel out to followers' timelines in real time.  The
 next chapter makes Alice herself follow remote accounts, which
 sets up the timeline view that comes right after.
+
+
+Following remote accounts
+-------------------------
+
+So far Alice can be followed.  This chapter teaches her to follow
+back.  Two halves: a `following` table that records who she has
+asked to follow, and a small page that takes a `@user@host` handle
+and sends a `Follow` activity to that account's inbox.
+
+### Schema: who alice is following
+
+Add a `following` table to *server/db/schema.ts*.  The shape mirrors
+the `follows` table from earlier, but flipped: instead of caching a
+follower we cache the person Alice is following.
+
+~~~~ typescript [server/db/schema.ts]
+export const following = sqliteTable(
+  "following",
+  {
+    followingUserId: integer("following_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    actorUri: text("actor_uri").notNull(),
+    actorHandle: text("actor_handle").notNull(),
+    actorName: text("actor_name"),
+    actorInbox: text("actor_inbox").notNull(),
+    actorSharedInbox: text("actor_shared_inbox"),
+    followActivityId: text("follow_activity_id").notNull().unique(),
+    accepted: integer("accepted", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [primaryKey({ columns: [table.followingUserId, table.actorUri] })],
+);
+
+export type FollowingRow = typeof following.$inferSelect;
+~~~~
+
+Two fields deserve a note:
+
+`followActivityId`
+:   The URI of the `Follow` activity we send.  When the remote
+    accepts, the `Accept` activity quotes that URI back at us, so
+    we use it as the join key.  The column is `unique` so a stray
+    duplicate `Accept` can't update two rows.
+
+`accepted`
+:   Boolean flag.  We mark the row `false` when we send the
+    `Follow`; the inbox handler flips it to `true` once the
+    `Accept(Follow)` arrives.
+
+Apply the migration:
+
+~~~~ sh
+npm run db:push
+~~~~
+
+### API: looking up the actor and sending follow
+
+The actual Follow flow is one POST endpoint.  Create
+*server/api/follow.post.ts*:
+
+~~~~ typescript [server/api/follow.post.ts]
+import { Follow } from "@fedify/vocab";
+import { getRequestURL } from "h3";
+import { following, users } from "../db/schema";
+import federation from "../federation";
+import { db } from "../utils/db";
+
+interface FollowBody {
+  handle?: string;
+}
+
+export default defineEventHandler(async (event) => {
+  const body = await readBody<FollowBody>(event);
+  const handle = body?.handle?.trim();
+  if (!handle) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: "Enter a handle like @user@example.com.",
+    });
+  }
+
+  const user = db.select().from(users).get();
+  if (user == null) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: "Set up an account before following.",
+    });
+  }
+
+  const origin = new URL(
+    getRequestURL(event, { xForwardedHost: true, xForwardedProto: true })
+      .origin,
+  );
+  const ctx = federation.createContext(origin, undefined);
+
+  const actor = await ctx.lookupObject(handle);
+  if (
+    actor == null ||
+    actor.id == null ||
+    actor.inboxId == null ||
+    actor.preferredUsername == null
+  ) {
+    throw createError({
+      statusCode: 404,
+      statusMessage: `Could not resolve ${handle}.`,
+    });
+  }
+
+  const actorHandle = `@${actor.preferredUsername}@${actor.id.host}`;
+  const followActivityId = new URL(
+    `#follows/${crypto.randomUUID()}`,
+    ctx.getActorUri(user.username),
+  );
+
+  db.insert(following)
+    .values({
+      followingUserId: user.id,
+      actorUri: actor.id.href,
+      actorHandle,
+      actorName: actor.name?.toString() ?? null,
+      actorInbox: actor.inboxId.href,
+      actorSharedInbox: actor.endpoints?.sharedInbox?.href ?? null,
+      followActivityId: followActivityId.href,
+      accepted: false,
+    })
+    .onConflictDoUpdate({
+      target: [following.followingUserId, following.actorUri],
+      set: {
+        actorHandle,
+        actorName: actor.name?.toString() ?? null,
+        actorInbox: actor.inboxId.href,
+        actorSharedInbox: actor.endpoints?.sharedInbox?.href ?? null,
+        followActivityId: followActivityId.href,
+        accepted: false,
+      },
+    })
+    .run();
+
+  await ctx.sendActivity(
+    { identifier: user.username },
+    actor,
+    new Follow({
+      id: followActivityId,
+      actor: ctx.getActorUri(user.username),
+      object: actor.id,
+    }),
+  );
+
+  return { handle: actorHandle };
+});
+~~~~
+
+Three new ideas:
+
+`ctx.lookupObject(handle)`
+:   Takes either an `@user@host` handle or an `https://` URL.  For
+    a handle, Fedify performs a WebFinger lookup to find the actor
+    URL, then fetches the actor.  For a URL, it just fetches the
+    actor.  The return type is the union of every ActivityStreams
+    actor type; we narrow with the `inboxId`/`preferredUsername`
+    null checks.
+
+`onConflictDoUpdate`
+:   If Alice has already tried to follow this handle, we replace
+    the previous row instead of inserting a second one.  That covers
+    cases where the previous `Follow` was lost or the remote actor
+    moved hosts.
+
+`new Follow({ id, actor, object })`
+:   The activity body itself.  We hand the actor to `sendActivity`
+    as the recipient; Fedify discovers the inbox from the actor we
+    just fetched and signs the delivery for us.
+
+### Inbox: receiving accept(follow)
+
+Right now an `Accept` is silently ignored by the inbox.  Open
+*server/federation.ts* and add an `Accept` listener next to the
+existing `Follow` and `Undo` listeners.  Don't forget to add
+`Accept` to the import line at the top:
+
+~~~~ typescript [server/federation.ts]
+import { Accept, /* … */ } from "@fedify/vocab";
+import { following, follows, /* … */ } from "./db/schema";
+~~~~
+
+Then chain the listener after `Follow` and before `Undo`:
+
+~~~~ typescript [server/federation.ts]
+.on(Accept, async (ctx, accept) => {
+  const followObject = await accept.getObject(ctx);
+  if (!(followObject instanceof Follow) || followObject.id == null) {
+    return;
+  }
+  const updated = db
+    .update(following)
+    .set({ accepted: true })
+    .where(eq(following.followActivityId, followObject.id.href))
+    .returning()
+    .all();
+  if (updated.length > 0) {
+    logger.info("Follow accepted by {actor}", {
+      actor: updated[0].actorUri,
+    });
+  }
+})
+~~~~
+
+`accept.getObject(ctx)` resolves the inner `Follow`.  Sometimes the
+remote sends it inline (we get a `Follow` instance back directly),
+sometimes only by URL (Fedify fetches it for us).  Either way we
+end up with a `Follow` whose `id` is the URI we minted earlier; the
+`UPDATE` keys on that.
+
+### A tiny form to drive it
+
+Create *app/pages/follow.vue*:
+
+~~~~ vue [app/pages/follow.vue]
+<script setup lang="ts">
+import type { User } from "~~/server/db/schema";
+
+const { data: user } = await useFetch<User>("/api/me");
+
+const handle = ref("");
+const status = ref<"idle" | "submitting" | "success" | "error">("idle");
+const message = ref("");
+
+async function submit(): Promise<void> {
+  status.value = "submitting";
+  message.value = "";
+  try {
+    const result = await $fetch<{ handle: string }>("/api/follow", {
+      method: "POST",
+      body: { handle: handle.value },
+    });
+    status.value = "success";
+    message.value = `Sent a follow request to ${result.handle}.`;
+    handle.value = "";
+  } catch (err) {
+    status.value = "error";
+    const e = err as { statusMessage?: string; message?: string };
+    message.value = e.statusMessage ?? e.message ?? "Something went wrong.";
+  }
+}
+</script>
+
+<template>
+  <section class="follow">
+    <h1>Follow someone</h1>
+    <p class="hint">
+      Enter a handle in the form
+      <code>@user@example.com</code>. We will look the actor up and send a
+      <code>Follow</code> activity to their inbox.
+    </p>
+
+    <form @submit.prevent="submit">
+      <label>
+        <span>Handle</span>
+        <input
+          v-model="handle"
+          type="text"
+          placeholder="@alice@mastodon.example"
+          required
+          :disabled="status === 'submitting'"
+        />
+      </label>
+      <button type="submit" :disabled="status === 'submitting' || !handle">
+        {{ status === "submitting" ? "Sending…" : "Send follow request" }}
+      </button>
+    </form>
+
+    <p v-if="message" :class="['feedback', status]">{{ message }}</p>
+  </section>
+</template>
+~~~~
+
+The styles are a slim variation on the compose form.  Refer to the
+[example repo][fedify-dev/content-sharing] for the full
+*app/pages/follow.vue* file.
+
+While we're here, add a “Follow” link next to “Post” in
+*app/app.vue* so you can reach the form from the header.
+
+### Try it
+
+With the dev server and a tunnel still running, open `/follow` in
+the browser and submit the handle of an account on a fediverse
+instance you control (or one of yours on a sandbox like
+[ActivityPub.Academy]).  You should see a “Sent a follow request”
+banner immediately.
+
+A few seconds later, an `Accept(Follow)` arrives at Alice's inbox
+and your dev terminal logs:
+
+~~~~ console
+content-sharing | INFO  | Follow accepted by https://example.social/users/bob
+~~~~
+
+The next chapter makes that follow visible on her profile.
+
+
+Following list and ActivityPub collection
+-----------------------------------------
+
+The follow worked but Alice's profile still says “0 Following”.
+We'll fix that and expose a matching ActivityPub collection so
+remote servers can browse who she follows.
+
+### Federation: a following collection
+
+Add `setFollowingDispatcher` next to `setFollowersDispatcher` in
+*server/federation.ts*.  The two are nearly mirror images.
+
+~~~~ typescript [server/federation.ts]
+federation
+  .setFollowingDispatcher(
+    "/users/{identifier}/following",
+    (_ctx, identifier) => {
+      const user = db
+        .select()
+        .from(users)
+        .where(eq(users.username, identifier))
+        .get();
+      if (user == null) return null;
+
+      const rows = db
+        .select()
+        .from(following)
+        .where(
+          and(
+            eq(following.followingUserId, user.id),
+            eq(following.accepted, true),
+          ),
+        )
+        .all();
+      const items = rows.map((row) => new URL(row.actorUri));
+      return { items };
+    },
+  )
+  .setCounter((_ctx, identifier) => {
+    const user = db
+      .select()
+      .from(users)
+      .where(eq(users.username, identifier))
+      .get();
+    if (user == null) return 0;
+    const row = db
+      .select({ count: sql<number>`count(*)` })
+      .from(following)
+      .where(
+        and(
+          eq(following.followingUserId, user.id),
+          eq(following.accepted, true),
+        ),
+      )
+      .get();
+    return row?.count ?? 0;
+  });
+~~~~
+
+Two notes on the shape:
+
+ -  We only count and serve rows where `accepted = true`.  Pending
+    follow requests are an internal detail; remote servers would
+    just see a wrong number otherwise.
+ -  The dispatcher returns plain `URL`s.  Fedify accepts either an
+    `Actor` instance or a URL; the latter saves us a fetch per item
+    when the consumer just wants a list of IDs.
+
+Wire the collection URL into the actor itself by adding a
+`following` field to the `Person` we return from
+`setActorDispatcher`:
+
+~~~~ typescript [server/federation.ts]
+return new Person({
+  // …
+  followers: ctx.getFollowersUri(identifier),
+  following: ctx.getFollowingUri(identifier), // [!code ++]
+  url: actorUri,
+  // …
+});
+~~~~
+
+### HTML: the list page
+
+Create the JSON endpoint
+*server/api/users/[username]/following.get.ts* and the page
+*app/pages/users/[username]/following.vue*.  Both follow the
+followers files closely, so we'll only spotlight the differences.
+
+The endpoint returns every row, even pending ones, so the page can
+render a “Pending” tag, but it derives the headline `total` from
+the accepted count alone:
+
+~~~~ typescript [server/api/users/[username]/following.get.ts]
+const acceptedCount = db
+  .select({ count: following.actorUri })
+  .from(following)
+  .where(
+    and(eq(following.followingUserId, user.id), eq(following.accepted, true)),
+  )
+  .all().length;
+
+return {
+  total: acceptedCount,
+  items: rows,
+};
+~~~~
+
+The Vue page renders each row and tags pending requests with a
+muted badge:
+
+~~~~ vue [app/pages/users/[username]/following.vue]
+<li v-for="f in data.items" :key="f.uri">
+  <a :href="f.uri" rel="noopener" target="_blank">
+    <span class="name">{{ f.name ?? f.handle }}</span>
+    <span class="handle">{{ f.handle }}</span>
+  </a>
+  <span v-if="!f.accepted" class="pending">Pending</span>
+</li>
+~~~~
+
+Finally, surface the count in the profile header by adding a third
+stat link to *app/pages/users/[username]/index.vue*:
+
+~~~~ vue [app/pages/users/[username]/index.vue]
+const { data: followingData } = await useFetch<{ total: number }>(
+  () => `/api/users/${username.value}/following`,
+);
+~~~~
+
+~~~~ vue [app/pages/users/[username]/index.vue]
+<NuxtLink :to="`/users/${username}/following`">
+  <strong>{{ followingData?.total ?? 0 }}</strong>
+  Following
+</NuxtLink>
+~~~~
+
+### Try it
+
+Visit `/users/alice` after sending a Follow.  The “Following”
+counter increments as soon as the remote sends back its
+`Accept(Follow)`.  Tap the link and you should see the remote
+account listed.
+
+You can also confirm the ActivityPub side from a terminal:
+
+~~~~ sh
+curl -H 'Accept: application/activity+json' \
+  https://<your-tunnel-host>/users/alice/following
+~~~~
+
+The response is an `OrderedCollection` whose `totalItems` matches
+the page count.  Mastodon and Pixelfed will follow the `first`
+link to traverse pages when they want to render Alice's profile.
+
+
+Receiving posts: the timeline
+-----------------------------
+
+Now that Alice follows people, their posts will start fanning out
+to her inbox.  This chapter teaches the inbox to keep them and
+adds a `/timeline` page that lists them.
+
+### Schema: a timeline cache
+
+The shape we need for each row mirrors what we'd render on a card.
+Add to *server/db/schema.ts*:
+
+~~~~ typescript [server/db/schema.ts]
+export const timelinePosts = sqliteTable("timeline_posts", {
+  noteUri: text("note_uri").primaryKey(),
+  actorUri: text("actor_uri").notNull(),
+  actorHandle: text("actor_handle").notNull(),
+  actorName: text("actor_name"),
+  actorUrl: text("actor_url"),
+  imageUrl: text("image_url").notNull(),
+  mediaType: text("media_type").notNull(),
+  caption: text("caption").notNull().default(""),
+  noteUrl: text("note_url"),
+  publishedAt: text("published_at"),
+  receivedAt: text("received_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export type TimelinePost = typeof timelinePosts.$inferSelect;
+~~~~
+
+The `noteUri` is the canonical ActivityPub identifier; we use it as
+both the primary key (so a duplicate delivery is a no-op) and the
+join key for the like and comment tables we'll add later.
+
+`npm run db:push` to apply.
+
+### Inbox: a create listener
+
+Extend `setInboxListeners` in *server/federation.ts* with a `Create`
+handler.  Imports first:
+
+~~~~ typescript [server/federation.ts]
+import {
+  Accept,
+  Create, // [!code ++]
+  Document,
+  Endpoints,
+  Follow,
+  Image, // [!code ++]
+  Note,
+  Person,
+  PUBLIC_COLLECTION,
+  Undo,
+} from "@fedify/vocab";
+import {
+  following,
+  follows,
+  keys,
+  posts,
+  timelinePosts, // [!code ++]
+  users,
+} from "./db/schema";
+~~~~
+
+Then the listener.  Insert it between the existing `Follow` listener
+and the `Accept` listener:
+
+~~~~ typescript [server/federation.ts]
+.on(Create, async (ctx, create) => {
+  const note = await create.getObject(ctx);
+  if (!(note instanceof Note) || note.id == null) return;
+  if (note.replyTargetId != null) return;
+
+  const authorId = note.attributionId ?? create.actorId;
+  if (authorId == null) return;
+
+  const user = db.select().from(users).get();
+  if (user == null) return;
+
+  const followingRow = db
+    .select()
+    .from(following)
+    .where(
+      and(
+        eq(following.followingUserId, user.id),
+        eq(following.actorUri, authorId.href),
+        eq(following.accepted, true),
+      ),
+    )
+    .get();
+  if (followingRow == null) return;
+
+  let imageUrl: string | null = null;
+  let mediaType: string | null = null;
+  for await (const att of note.getAttachments(ctx)) {
+    if (!(att instanceof Document) && !(att instanceof Image)) continue;
+    const url = att.url instanceof URL ? att.url : (att.url?.href ?? null);
+    const type = att.mediaType ?? null;
+    if (url == null || type == null || !type.startsWith("image/")) continue;
+    imageUrl = url.href;
+    mediaType = type;
+    break;
+  }
+  if (imageUrl == null || mediaType == null) return;
+
+  let actorName: string | null = followingRow.actorName;
+  let actorUrl: string | null = null;
+  const author = await note.getAttribution(ctx);
+  if (author != null) {
+    actorName = author.name?.toString() ?? actorName;
+    actorUrl = author.url instanceof URL ? author.url.href : null;
+  }
+
+  db.insert(timelinePosts)
+    .values({
+      noteUri: note.id.href,
+      actorUri: authorId.href,
+      actorHandle: followingRow.actorHandle,
+      actorName,
+      actorUrl,
+      imageUrl,
+      mediaType,
+      caption: note.content?.toString() ?? "",
+      noteUrl: note.url instanceof URL ? note.url.href : null,
+      publishedAt: note.published?.toString() ?? null,
+    })
+    .onConflictDoNothing()
+    .run();
+})
+~~~~
+
+The handler is conservative on purpose:
+
+ -  We skip notes with `replyTargetId` set.  Replies belong in the
+    comments thread, not the timeline; we handle them in the
+    comments chapters.
+ -  We require an entry in `following` whose `accepted` is `true`.
+    Anything else is either a misaddressed delivery or a forwarded
+    post we don't have context for.
+ -  We require at least one image attachment with an `image/*`
+    media type.  This is meant to be a Pixelfed-shaped service;
+    text-only notes are dropped.
+ -  Each attachment loop only stores the *first* image, which keeps
+    the schema flat.  Once you understand the rest, multi-image
+    posts are a small extension to schema and template.
+
+### Endpoint and page
+
+The endpoint is a one-liner.  Create
+*server/api/timeline.get.ts*:
+
+~~~~ typescript [server/api/timeline.get.ts]
+import { desc } from "drizzle-orm";
+import { timelinePosts } from "../db/schema";
+import { db } from "../utils/db";
+
+export default defineEventHandler(() => {
+  const items = db
+    .select()
+    .from(timelinePosts)
+    .orderBy(desc(timelinePosts.receivedAt))
+    .limit(50)
+    .all();
+
+  return { items };
+});
+~~~~
+
+And the page at *app/pages/timeline.vue* draws each row as a card
+with author, image, caption, and timestamp.  See the example repo
+for the full template; the only Fedify-specific detail is that
+`post.noteUrl` (the original-instance permalink) gets priority over
+`post.noteUri` for the “view source” link.
+
+Add a “Timeline” link to *app/app.vue*'s header so it's reachable.
+
+### Try it
+
+With your tunnel up, follow a public account from a real fediverse
+instance through `/follow`.  Have that account publish an image
+post.  Within seconds, refresh `/timeline`; you should see the card.
+
+> [!TIP]
+> If nothing arrives, watch the dev terminal during the post.  An
+> ignored Create from someone outside `following` won't log; an
+> accepted one prints a `Stored timeline post` line.  If neither
+> happens, the activity isn't reaching the inbox; the most common
+> cause is that your tunnel URL changed since the follow was sent
+> and the remote server cached the old URL for Alice.
+
+
+Sending like and undo(like)
+---------------------------
+
+Now that Alice has a timeline she'll want to give those posts a
+heart.  This chapter sends `Like` (and `Undo(Like)`) to the post
+authors and reflects the state in the UI.
+
+### Schema and toggle endpoint
+
+Add an `outbound_likes` table.  We track the URI of the `Like`
+activity we sent so a later `Undo` can quote it back.
+
+~~~~ typescript [server/db/schema.ts]
+export const outboundLikes = sqliteTable(
+  "outbound_likes",
+  {
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    postUri: text("post_uri").notNull(),
+    likeActivityId: text("like_activity_id").notNull().unique(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.postUri] })],
+);
+
+export type OutboundLike = typeof outboundLikes.$inferSelect;
+~~~~
+
+A toggle endpoint reads the URI off the timeline cache, sends the
+appropriate activity, and returns the resulting state.  Create
+*server/api/likes.post.ts*:
+
+~~~~ typescript [server/api/likes.post.ts]
+import { Like, Undo } from "@fedify/vocab";
+import { and, eq } from "drizzle-orm";
+import { getRequestURL } from "h3";
+import { following, outboundLikes, timelinePosts, users } from "../db/schema";
+import federation from "../federation";
+import { db } from "../utils/db";
+
+interface LikeBody {
+  postUri?: string;
+}
+
+export default defineEventHandler(async (event) => {
+  const body = await readBody<LikeBody>(event);
+  const postUri = body?.postUri?.trim();
+  if (!postUri) {
+    throw createError({ statusCode: 400, statusMessage: "Missing postUri." });
+  }
+
+  const user = db.select().from(users).get();
+  if (user == null) {
+    throw createError({ statusCode: 409, statusMessage: "No account." });
+  }
+
+  const post = db
+    .select()
+    .from(timelinePosts)
+    .where(eq(timelinePosts.noteUri, postUri))
+    .get();
+  if (post == null) {
+    throw createError({ statusCode: 404, statusMessage: "Unknown post." });
+  }
+
+  const author = db
+    .select()
+    .from(following)
+    .where(
+      and(
+        eq(following.followingUserId, user.id),
+        eq(following.actorUri, post.actorUri),
+      ),
+    )
+    .get();
+  if (author == null) {
+    throw createError({
+      statusCode: 403,
+      statusMessage: "You can only like posts from accounts you follow.",
+    });
+  }
+
+  const origin = new URL(
+    getRequestURL(event, { xForwardedHost: true, xForwardedProto: true })
+      .origin,
+  );
+  const ctx = federation.createContext(origin, undefined);
+  const recipient = {
+    id: new URL(author.actorUri),
+    inboxId: new URL(author.actorInbox),
+    endpoints:
+      author.actorSharedInbox == null
+        ? null
+        : { sharedInbox: new URL(author.actorSharedInbox) },
+  };
+
+  const existing = db
+    .select()
+    .from(outboundLikes)
+    .where(
+      and(
+        eq(outboundLikes.userId, user.id),
+        eq(outboundLikes.postUri, postUri),
+      ),
+    )
+    .get();
+
+  if (existing != null) {
+    db.delete(outboundLikes)
+      .where(
+        and(
+          eq(outboundLikes.userId, user.id),
+          eq(outboundLikes.postUri, postUri),
+        ),
+      )
+      .run();
+    await ctx.sendActivity(
+      { identifier: user.username },
+      recipient,
+      new Undo({
+        id: new URL(
+          `#likes/${crypto.randomUUID()}/undo`,
+          ctx.getActorUri(user.username),
+        ),
+        actor: ctx.getActorUri(user.username),
+        object: new Like({
+          id: new URL(existing.likeActivityId),
+          actor: ctx.getActorUri(user.username),
+          object: new URL(postUri),
+        }),
+      }),
+    );
+    return { liked: false };
+  }
+
+  const likeActivityId = new URL(
+    `#likes/${crypto.randomUUID()}`,
+    ctx.getActorUri(user.username),
+  );
+  db.insert(outboundLikes)
+    .values({
+      userId: user.id,
+      postUri,
+      likeActivityId: likeActivityId.href,
+    })
+    .run();
+  await ctx.sendActivity(
+    { identifier: user.username },
+    recipient,
+    new Like({
+      id: likeActivityId,
+      actor: ctx.getActorUri(user.username),
+      object: new URL(postUri),
+    }),
+  );
+  return { liked: true };
+});
+~~~~
+
+A few things worth pointing out:
+
+ -  `recipient` is a structural object, not an `Actor`.  Fedify
+    accepts anything that satisfies its `Recipient` shape: an `id`
+    and an `inboxId` are the bare minimum, with optional shared
+    inbox.  We get away without re-fetching the actor because all
+    of those fields are already cached on the `following` row.
+ -  `Undo(Like)` quotes the *original* `Like` activity by URI, not
+    just the post URI.  Mastodon and friends use that URI to find
+    and remove the previous like; without it the undo silently
+    fails.
+
+### Surface the button
+
+Update the timeline endpoint to indicate which posts the local user
+has already liked:
+
+~~~~ typescript [server/api/timeline.get.ts]
+import { desc, eq } from "drizzle-orm";
+import { outboundLikes, timelinePosts, users } from "../db/schema";
+import { db } from "../utils/db";
+
+export default defineEventHandler(() => {
+  const user = db.select().from(users).get();
+  const likedSet = new Set<string>();
+  if (user != null) {
+    const liked = db
+      .select({ postUri: outboundLikes.postUri })
+      .from(outboundLikes)
+      .where(eq(outboundLikes.userId, user.id))
+      .all();
+    for (const row of liked) likedSet.add(row.postUri);
+  }
+
+  const rows = db
+    .select()
+    .from(timelinePosts)
+    .orderBy(desc(timelinePosts.receivedAt))
+    .limit(50)
+    .all();
+
+  const items = rows.map((row) => ({
+    ...row,
+    likedByMe: likedSet.has(row.noteUri),
+  }));
+
+  return { items };
+});
+~~~~
+
+Then add a button to each card in *app/pages/timeline.vue*:
+
+~~~~ vue [app/pages/timeline.vue]
+<button
+  type="button"
+  :class="['like', { liked: post.likedByMe }]"
+  :disabled="pending.has(post.noteUri)"
+  :aria-pressed="post.likedByMe"
+  @click="toggleLike(post)"
+>
+  <span aria-hidden="true">{{ post.likedByMe ? "♥" : "♡" }}</span>
+  {{ post.likedByMe ? "Liked" : "Like" }}
+</button>
+~~~~
+
+The matching `toggleLike` calls `/api/likes` and refreshes the
+data.  Refer to the example repo for the surrounding `<script>`
+and styles.
+
+### Try it
+
+Tap the heart on a card.  The icon flips immediately because the
+endpoint refresh updates the timeline data; the underlying `Like`
+delivery happens in the background.  Open the post on its origin
+instance: a moment later the like count there should bump up.
+
+Tap again to undo.  The remote server removes Alice from the like
+list within seconds.
+
+
+Receiving like and undo(like)
+-----------------------------
+
+The other side of the same coin: when somebody likes one of Alice's
+posts, the activity hits her inbox.  We'll cache it so the post
+detail page can render the count.
+
+### Schema
+
+~~~~ typescript [server/db/schema.ts]
+export const inboundLikes = sqliteTable(
+  "inbound_likes",
+  {
+    postId: text("post_id")
+      .notNull()
+      .references(() => posts.id, { onDelete: "cascade" }),
+    actorUri: text("actor_uri").notNull(),
+    actorHandle: text("actor_handle"),
+    actorName: text("actor_name"),
+    likeActivityId: text("like_activity_id").notNull().unique(),
+    receivedAt: text("received_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [primaryKey({ columns: [table.postId, table.actorUri] })],
+);
+
+export type InboundLike = typeof inboundLikes.$inferSelect;
+~~~~
+
+Note the FK on `postId`: an inbound like only makes sense for one of
+*our* posts, so we use the local row id directly.
+
+### Inbox: a like listener
+
+Add `Like` to the imports in *server/federation.ts*, then chain a
+listener after `Accept`:
+
+~~~~ typescript [server/federation.ts]
+.on(Like, async (ctx, like) => {
+  if (like.id == null || like.objectId == null || like.actorId == null) {
+    return;
+  }
+  const parsed = ctx.parseUri(like.objectId);
+  if (parsed?.type !== "object" || parsed.class !== Note) return;
+  const postId = parsed.values.id;
+  const post = db.select().from(posts).where(eq(posts.id, postId)).get();
+  if (post == null) return;
+
+  const actor = await like.getActor(ctx);
+  const actorHandle =
+    actor?.preferredUsername != null && actor.id != null
+      ? `@${actor.preferredUsername}@${actor.id.host}`
+      : null;
+
+  db.insert(inboundLikes)
+    .values({
+      postId,
+      actorUri: like.actorId.href,
+      actorHandle,
+      actorName: actor?.name?.toString() ?? null,
+      likeActivityId: like.id.href,
+    })
+    .onConflictDoNothing()
+    .run();
+})
+~~~~
+
+`ctx.parseUri` is the inverse of the URL-template helpers we used
+when building activities.  For our
+`setObjectDispatcher(Note, "/users/{identifier}/posts/{id}", ...)` it returns
+`{ type: "object", class: Note, values: { identifier, id } }`, which lets us
+look up the post by id.
+
+### Extending undo
+
+The existing `Undo` listener only knows about `Follow`.  Make it
+branch on the inner type:
+
+~~~~ typescript [server/federation.ts]
+.on(Undo, async (ctx, undo) => {
+  const object = await undo.getObject(ctx);
+  if (object instanceof Like) {
+    if (object.id == null) return;
+    const deleted = db
+      .delete(inboundLikes)
+      .where(eq(inboundLikes.likeActivityId, object.id.href))
+      .returning()
+      .all();
+    if (deleted.length > 0) {
+      logger.info("Like undone for post {post}", { post: deleted[0].postId });
+    }
+    return;
+  }
+  if (!(object instanceof Follow)) return;
+  // …existing Follow body unchanged…
+})
+~~~~
+
+### Showing the count
+
+Update *server/api/users/[username]/posts/[id].get.ts* to load the
+likes alongside the post:
+
+~~~~ typescript [server/api/users/[username]/posts/[id].get.ts]
+const likes = db
+  .select({
+    actorUri: inboundLikes.actorUri,
+    actorHandle: inboundLikes.actorHandle,
+    actorName: inboundLikes.actorName,
+    receivedAt: inboundLikes.receivedAt,
+  })
+  .from(inboundLikes)
+  .where(eq(inboundLikes.postId, row.id))
+  .orderBy(desc(inboundLikes.receivedAt))
+  .all();
+
+return { ...row, likes: { total: likes.length, items: likes } };
+~~~~
+
+And render the result in
+*app/pages/users/[username]/posts/[id].vue*:
+
+~~~~ vue [app/pages/users/[username]/posts/[id].vue]
+<p class="like-count">
+  <span aria-hidden="true">♥</span>
+  {{ post.likes.total }}
+  {{ post.likes.total === 1 ? "like" : "likes" }}
+</p>
+
+<ul v-if="post.likes.items.length > 0" class="like-list">
+  <li v-for="like in post.likes.items" :key="like.actorUri">
+    <a :href="like.actorUri" rel="noopener" target="_blank">
+      {{ like.actorName ?? like.actorHandle ?? like.actorUri }}
+    </a>
+  </li>
+</ul>
+~~~~
+
+### Try it
+
+From a Mastodon (or Pixelfed) account, open one of Alice's posts and
+tap the heart.  Reload the post detail page on Alice's server: the
+count goes up by one and the actor's handle appears in the small
+list below.  Untap on the remote side and reload again; the entry
+disappears as the `Undo(Like)` arrives.
+
+
+Composing comments locally
+--------------------------
+
+Comments are just `Note`s with `inReplyTo` set, but federating them
+is enough work that we'll split it across two chapters.  This first
+half adds a comments table, an API for storing replies, and a UI
+component for rendering and writing them.  The federation side
+comes next.
+
+### Schema
+
+~~~~ typescript [server/db/schema.ts]
+export const comments = sqliteTable("comments", {
+  id: text("id").primaryKey(),
+  noteUri: text("note_uri").notNull().unique(),
+  inReplyToUri: text("in_reply_to_uri").notNull(),
+  actorUri: text("actor_uri").notNull(),
+  actorHandle: text("actor_handle"),
+  actorName: text("actor_name"),
+  actorUrl: text("actor_url"),
+  content: text("content").notNull(),
+  publishedAt: text("published_at"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  local: integer("local", { mode: "boolean" }).notNull().default(false),
+});
+
+export type Comment = typeof comments.$inferSelect;
+~~~~
+
+The two flags worth noting:
+
+`noteUri`
+:   The canonical ActivityPub URI of the comment.  For local
+    comments we mint it ourselves; for incoming ones we use whatever
+    the remote sent.  The unique index keeps a duplicate `Create`
+    delivery from inserting twice.
+
+`local`
+:   `true` when Alice wrote the row; `false` when it came in from
+    the inbox.  The federation chapter uses this flag to skip
+    re-broadcasting incoming comments.
+
+### Endpoints
+
+POST stores a local comment:
+
+~~~~ typescript [server/api/comments.post.ts]
+import { randomUUID } from "node:crypto";
+import { getRequestURL } from "h3";
+import { comments, users } from "../db/schema";
+import { db } from "../utils/db";
+
+interface CommentBody {
+  inReplyToUri?: string;
+  content?: string;
+}
+
+export default defineEventHandler(async (event) => {
+  const body = await readBody<CommentBody>(event);
+  const inReplyToUri = body?.inReplyToUri?.trim();
+  const content = body?.content?.trim();
+  if (!inReplyToUri || !content) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: "A reply target and content are required.",
+    });
+  }
+
+  const user = db.select().from(users).get();
+  if (user == null) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: "Set up an account before commenting.",
+    });
+  }
+
+  const id = randomUUID();
+  const origin = new URL(
+    getRequestURL(event, { xForwardedHost: true, xForwardedProto: true })
+      .origin,
+  );
+  const noteUri = `${origin.origin}/users/${user.username}/comments/${id}`;
+  const actorUri = `${origin.origin}/users/${user.username}`;
+  const html = `<p>${escapeHtml(content)}</p>`;
+
+  db.insert(comments)
+    .values({
+      id,
+      noteUri,
+      inReplyToUri,
+      actorUri,
+      actorHandle: `@${user.username}@${origin.host}`,
+      actorName: user.name,
+      actorUrl: actorUri,
+      content: html,
+      publishedAt: new Date().toISOString(),
+      local: true,
+    })
+    .run();
+
+  return { id, noteUri };
+});
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+~~~~
+
+GET returns every comment whose `inReplyToUri` matches a given URI,
+oldest first:
+
+~~~~ typescript [server/api/comments.get.ts]
+import { asc, eq } from "drizzle-orm";
+import { comments } from "../db/schema";
+import { db } from "../utils/db";
+
+export default defineEventHandler((event) => {
+  const inReplyToUri = getQuery(event).inReplyToUri;
+  if (typeof inReplyToUri !== "string" || inReplyToUri.length === 0) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: "Missing inReplyToUri.",
+    });
+  }
+
+  const items = db
+    .select()
+    .from(comments)
+    .where(eq(comments.inReplyToUri, inReplyToUri))
+    .orderBy(asc(comments.createdAt))
+    .all();
+
+  return { items };
+});
+~~~~
+
+### A reusable thread component
+
+Both the post detail page and the timeline cards want the same
+component.  Create *app/components/CommentThread.vue* (full source
+in the example repo).  The interesting parts are the prop shape and
+the submit handler:
+
+~~~~ vue [app/components/CommentThread.vue]
+const props = defineProps<{ inReplyToUri: string }>();
+
+const { data, refresh } = await useFetch<{ items: CommentItem[] }>(
+  "/api/comments",
+  { query: { inReplyToUri: props.inReplyToUri } },
+);
+
+async function submit(): Promise<void> {
+  if (!draft.value.trim()) return;
+  status.value = "submitting";
+  try {
+    await $fetch("/api/comments", {
+      method: "POST",
+      body: { inReplyToUri: props.inReplyToUri, content: draft.value },
+    });
+    draft.value = "";
+    await refresh();
+    status.value = "idle";
+  } catch (err) {
+    // …
+  }
+}
+~~~~
+
+Mount it on the post detail page below the like list:
+
+~~~~ vue [app/pages/users/[username]/posts/[id].vue]
+<CommentThread :in-reply-to-uri="postUri" />
+~~~~
+
+`postUri` is just the public URL of the post; we already have the
+`username` and `id` from the route.
+
+### Try it
+
+Open one of Alice's posts and write a comment.  After you submit,
+the new entry appears in the list under the post.  Refresh the
+page; it persists.  Federation still doesn't happen yet; the next
+chapter ships the comment to the rest of the fediverse.
+
+
+Sending replies as create(note) with `inReplyTo`
+------------------------------------------------
+
+This chapter teaches the comments endpoint to actually fan out the
+reply.  There are two cases: replies on Alice's own posts go to her
+followers, and replies on remote posts go to the original author
+plus her followers.
+
+### One note dispatcher to rule them all
+
+Fedify only allows a single object dispatcher per type.  Comments
+are `Note`s, and so are posts, so we can't add a second
+`setObjectDispatcher(Note, ...)`.  The cheapest fix mirrors what
+Mastodon does: serve every `Note` (post or reply) under the same
+URL space.  Extend the existing dispatcher in
+*server/federation.ts* to fall back to the `comments` table when the
+id doesn't match a post:
+
+~~~~ typescript [server/federation.ts]
+federation.setObjectDispatcher(
+  Note,
+  "/users/{identifier}/posts/{id}",
+  (ctx, { identifier, id }) => {
+    const post = db
+      .select({ post: posts, user: users })
+      .from(posts)
+      .innerJoin(users, eq(posts.userId, users.id))
+      .where(and(eq(users.username, identifier), eq(posts.id, id)))
+      .get();
+    if (post != null) return buildNote(ctx, identifier, post.post);
+
+    // Comments share the same Note dispatcher because Fedify only allows a
+    // single dispatcher per object type.  Mirroring Mastodon's "everything is
+    // a status" model, we expose replies under the same URL space.
+    const comment = db
+      .select({ comment: comments, user: users })
+      .from(comments)
+      .innerJoin(users, eq(users.username, identifier))
+      .where(and(eq(comments.id, id), eq(comments.local, true)))
+      .get();
+    if (comment == null) return null;
+    return new Note({
+      id: new URL(comment.comment.noteUri),
+      attributedTo: ctx.getActorUri(identifier),
+      to: PUBLIC_COLLECTION,
+      cc: ctx.getFollowersUri(identifier),
+      content: comment.comment.content,
+      replyTarget: new URL(comment.comment.inReplyToUri),
+      published:
+        comment.comment.publishedAt == null
+          ? null
+          : Temporal.Instant.from(comment.comment.publishedAt),
+      url: new URL(comment.comment.noteUri),
+    });
+  },
+);
+~~~~
+
+UUIDs from the `posts` and `comments` tables don't collide, so the
+combined dispatcher is unambiguous.  Add `comments` to the import
+list at the top.
+
+### Sending the activity
+
+Rewrite *server/api/comments.post.ts* to build a `Note` with
+`inReplyTo` set, wrap it in a `Create`, and dispatch it to the
+right recipients.  The full file is in the example repo; the new
+machinery is:
+
+~~~~ typescript [server/api/comments.post.ts]
+const ctx = federation.createContext(origin, undefined);
+const noteUri = ctx.getObjectUri(Note, { identifier: user.username, id });
+const actorUri = ctx.getActorUri(user.username);
+
+const target = resolveReplyTarget(ctx, inReplyToUri);
+
+// …insert into comments…
+
+const note = new Note({
+  id: noteUri,
+  attributedTo: actorUri,
+  to: PUBLIC_COLLECTION,
+  cc: ctx.getFollowersUri(user.username),
+  content: html,
+  replyTarget: new URL(inReplyToUri),
+  published: Temporal.Instant.from(publishedAt),
+  url: noteUri,
+  tags:
+    target.kind === "remote"
+      ? [
+          new Mention({
+            href: new URL(target.actorUri),
+            name: target.actorHandle ?? undefined,
+          }),
+        ]
+      : [],
+});
+
+const create = new Create({
+  id: new URL(`#comments/${id}/create`, actorUri),
+  actor: actorUri,
+  to: PUBLIC_COLLECTION,
+  cc: ctx.getFollowersUri(user.username),
+  published: note.published,
+  object: note,
+});
+
+if (target.kind === "remote") {
+  const recipient = {
+    id: new URL(target.actorUri),
+    inboxId: new URL(target.actorInbox),
+    endpoints:
+      target.actorSharedInbox == null
+        ? null
+        : { sharedInbox: new URL(target.actorSharedInbox) },
+  };
+  await ctx.sendActivity(
+    { identifier: user.username },
+    [recipient, "followers"],
+    create,
+  );
+} else {
+  await ctx.sendActivity({ identifier: user.username }, "followers", create);
+}
+~~~~
+
+The helper `resolveReplyTarget` decides whether the parent URI is
+local or remote.  `ctx.parseUri` gives a non-null result for local
+URIs; otherwise we look up the URI in `timeline_posts` to find the
+remote author cached in `following`:
+
+~~~~ typescript [server/api/comments.post.ts]
+function resolveReplyTarget(
+  ctx: { parseUri: (uri: URL) => unknown },
+  inReplyToUri: string,
+): ReplyTarget {
+  const parsed = ctx.parseUri(new URL(inReplyToUri));
+  if (parsed != null) return { kind: "local" };
+
+  const timelineEntry = db
+    .select()
+    .from(timelinePosts)
+    .where(eq(timelinePosts.noteUri, inReplyToUri))
+    .get();
+  if (timelineEntry == null) {
+    throw createError({
+      statusCode: 404,
+      statusMessage: "We don't know which post you're replying to.",
+    });
+  }
+  const author = db
+    .select()
+    .from(following)
+    .where(eq(following.actorUri, timelineEntry.actorUri))
+    .get();
+  if (author == null) {
+    throw createError({
+      statusCode: 404,
+      statusMessage: "We don't have inbox info for the original author.",
+    });
+  }
+  return {
+    kind: "remote",
+    actorUri: author.actorUri,
+    actorHandle: author.actorHandle,
+    actorInbox: author.actorInbox,
+    actorSharedInbox: author.actorSharedInbox,
+  };
+}
+~~~~
+
+The `Mention` tag deserves a callout: ActivityPub doesn't strictly
+require it, but Mastodon-family servers route notifications based on
+mentions in the `tag` array, not just on `to`/`cc`.  Without it, a
+reply to a Mastodon user goes through technically but never lights
+up their notification bell.
+
+### Surface the form on the timeline
+
+Mount the same `<CommentThread />` component on every timeline card
+so Alice can reply directly from her feed:
+
+~~~~ vue [app/pages/timeline.vue]
+<CommentThread :in-reply-to-uri="post.noteUri" />
+~~~~
+
+### Try it
+
+Open Alice's `/timeline`, expand the comment thread under a remote
+post, and reply.  Within seconds, the same reply appears on the
+original instance, and any account you follow there gets a
+notification.  Try the reverse path too: write a comment on one of
+Alice's own posts.  The federation side delivers it to her
+followers; on remote followers it shows up as a reply to the
+original post in their timeline.
+
+
+Receiving replies
+-----------------
+
+The last federation piece: pick up replies from the inbox and
+store them in the same `comments` table so the thread component
+displays both directions.
+
+### A lightly broader create handler
+
+Earlier we made the `Create` listener short-circuit on
+`replyTargetId != null`.  Replace that early return with a branch
+that delegates to a small helper:
+
+~~~~ typescript [server/federation.ts]
+.on(Create, async (ctx, create) => {
+  const note = await create.getObject(ctx);
+  if (!(note instanceof Note) || note.id == null) return;
+
+  const authorId = note.attributionId ?? create.actorId;
+  if (authorId == null) return;
+
+  const user = db.select().from(users).get();
+  if (user == null) return;
+
+  if (note.replyTargetId != null) {
+    await storeIncomingReply(ctx, note, authorId);
+    return;
+  }
+  // …existing timeline-store body unchanged…
+})
+~~~~
+
+The helper goes near the bottom of the file:
+
+~~~~ typescript [server/federation.ts]
+async function storeIncomingReply(
+  ctx: Parameters<Parameters<typeof federation.setInboxListeners>[0]>[0],
+  note: Note,
+  authorId: URL,
+): Promise<void> {
+  if (note.id == null || note.replyTargetId == null) return;
+  const inReplyToUri = note.replyTargetId.href;
+
+  // Only accept replies that target either one of our own notes (a post or a
+  // reply we already published) or one of the timeline rows we cached for the
+  // authenticated user.
+  const localTarget = ctx.parseUri(note.replyTargetId);
+  const isLocalTarget = localTarget != null;
+  const knownTimelineEntry =
+    db
+      .select()
+      .from(timelinePosts)
+      .where(eq(timelinePosts.noteUri, inReplyToUri))
+      .get() != null;
+  if (!isLocalTarget && !knownTimelineEntry) return;
+
+  const author = await note.getAttribution(ctx);
+  const actorHandle =
+    author?.preferredUsername != null && author.id != null
+      ? `@${author.preferredUsername}@${author.id.host}`
+      : null;
+  const actorName = author?.name?.toString() ?? null;
+  const actorUrl = author?.url instanceof URL ? author.url.href : null;
+
+  db.insert(comments)
+    .values({
+      id: crypto.randomUUID(),
+      noteUri: note.id.href,
+      inReplyToUri,
+      actorUri: authorId.href,
+      actorHandle,
+      actorName,
+      actorUrl,
+      content: note.content?.toString() ?? "",
+      publishedAt: note.published?.toString() ?? null,
+      local: false,
+    })
+    .onConflictDoNothing()
+    .run();
+}
+~~~~
+
+The acceptance check has two layers:
+
+ -  `ctx.parseUri(note.replyTargetId)` returns non-null when the
+    parent URI matches one of our own dispatcher routes.  That
+    covers replies to Alice's posts and replies-of-replies whose
+    parent is something we minted.
+ -  Otherwise, we accept the reply only if the parent URI is in
+    `timelinePosts`, meaning Alice already cached it from a Create
+    by someone she follows.  This keeps the comments table from
+    filling up with threads on posts she's never seen.
+
+`local: false` matters because the dispatcher we wrote in the
+previous chapter only serves rows where `local = true`.  Otherwise
+remote servers would fetch our URL for a comment we never authored.
+
+### Try it
+
+Write a reply to one of Alice's posts from a remote account.
+Within seconds, refresh the post detail page on Alice's instance:
+the reply is in the comment list, attributed to the remote actor.
+
+For the other direction, follow a remote account, reply to one of
+their posts from Alice's `/timeline`, and ask a third (also-remote)
+account to reply to that same post.  Both replies show up under the
+original post in Alice's thread view.
+
+The `comments` table now holds both sides of every conversation
+that involves Alice.  That's the whole reply loop.
+
+
+Areas for improvement
+---------------------
+
+The service is functional but minimal.  Natural next steps if you
+want to keep building on it:
+
+ -  **Multi-image posts**.  Pixelfed lets you attach up to ten
+    images per post.  The schema would need to split `posts` into
+    `posts` plus a `post_attachments` join table; the `Note`
+    dispatcher would emit each `Document` as a separate
+    `attachments` entry.
+ -  **Multi-user accounts and authentication**.  We pinned the
+    accounts table to a single row.  Lifting that constraint is a
+    matter of removing the `CHECK (id = 1)` and adding a session
+    cookie; everything else in the federation layer already keys
+    on `identifier`.
+ -  **Editing and deleting posts**.  ActivityPub spells these as
+    `Update(Note)` and `Delete(Note)` with an inner `Tombstone`.
+    The `Note` dispatcher would need to return `null` for deleted
+    rows so refetches return 404.
+ -  **Boosts**.  ActivityPub `Announce`.  Persist a row in an
+    `outbound_boosts` table, build an `Announce` whose `object` is
+    the post URI, and address it to followers.  The inbound side
+    is very similar to the like flow.
+ -  **Direct messages**.  ActivityPub doesn't standardise these,
+    but every Mastodon-family server treats `Note`s addressed only
+    to specific actors (no `Public`, no followers) as DMs.  You can
+    add a “compose DM” form that builds such a `Note`.
+ -  **Cleaning up unfollow on the outbound side**.  We send `Follow`
+    but never an `Undo(Follow)`.  Adding a “Stop following” button
+    on the following page is a small repeat of the like undo
+    pattern.
+ -  **Pagination**.  All the collection dispatchers and HTML pages
+    return everything in one go.  Adding cursor pagination is the
+    biggest UX win once you have more than a hundred rows.
