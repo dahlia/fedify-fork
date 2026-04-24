@@ -2140,3 +2140,317 @@ An empty result means the Undo was processed.
 With follow and unfollow both handled, the `follows` table is
 finally useful.  The next chapter surfaces it on a public followers
 page.
+
+
+Followers list
+--------------
+
+Alice has followers in the database, but nowhere to see them.  In
+this chapter we add:
+
+ -  A Nuxt page at `/users/<username>/followers` for humans.
+ -  An ActivityPub collection at the same URL for remote servers.
+ -  A follower count on the profile header with a link to the full
+    list.
+
+### Promoting the profile page into a directory
+
+So far the profile page is a single file
+(`app/pages/users/[username].vue`).  To hang sibling pages off
+`/users/<username>/...`, Nuxt expects the parent page to live as an
+`index.vue` inside a directory of the same name.  Move it:
+
+~~~~ sh
+mkdir -p "app/pages/users/[username]"
+git mv "app/pages/users/[username].vue" "app/pages/users/[username]/index.vue"
+~~~~
+
+(`git mv` keeps history intact, which is nice when a later `git blame` tracks
+who wrote the profile page.)
+
+### A `/api/users/<u>/followers` endpoint
+
+Create `server/api/users/[username]/followers.get.ts`:
+
+~~~~ typescript [server/api/users/[username]/followers.get.ts]
+import { desc, eq } from "drizzle-orm";
+import { follows, users } from "../../../db/schema";
+import { db } from "../../../utils/db";
+
+export default defineEventHandler((event) => {
+  const username = getRouterParam(event, "username");
+  if (username == null) {
+    throw createError({ statusCode: 400, statusMessage: "Missing username." });
+  }
+  const user = db
+    .select()
+    .from(users)
+    .where(eq(users.username, username))
+    .get();
+  if (user == null) {
+    throw createError({ statusCode: 404, statusMessage: "User not found." });
+  }
+
+  const rows = db
+    .select({
+      uri: follows.followerUri,
+      handle: follows.followerHandle,
+      name: follows.followerName,
+      acceptedAt: follows.acceptedAt,
+    })
+    .from(follows)
+    .where(eq(follows.followingUserId, user.id))
+    .orderBy(desc(follows.acceptedAt))
+    .all();
+
+  return {
+    total: rows.length,
+    items: rows,
+  };
+});
+~~~~
+
+We return four trimmed-down fields per row: the URI for the link,
+the handle for display, the cached display name, and the timestamp
+so future work could show how long someone has followed Alice.
+
+### The followers page
+
+Create `app/pages/users/[username]/followers.vue`:
+
+~~~~ vue [app/pages/users/[username]/followers.vue]
+<script setup lang="ts">
+const route = useRoute();
+const username = computed(() => route.params.username as string);
+
+interface FollowerItem {
+  uri: string;
+  handle: string;
+  name: string | null;
+  acceptedAt: string;
+}
+
+const { data } = await useFetch<{ total: number; items: FollowerItem[] }>(
+  () => `/api/users/${username.value}/followers`,
+);
+</script>
+
+<template>
+  <section class="followers">
+    <nav class="crumbs">
+      <NuxtLink :to="`/users/${username}`">← Back to @{{ username }}</NuxtLink>
+    </nav>
+    <h1>Followers ({{ data?.total ?? 0 }})</h1>
+
+    <ul v-if="data && data.items.length > 0" class="follower-list">
+      <li v-for="f in data.items" :key="f.uri">
+        <a :href="f.uri" rel="noopener">
+          <span class="name">{{ f.name ?? f.handle }}</span>
+          <span class="handle">{{ f.handle }}</span>
+        </a>
+      </li>
+    </ul>
+    <p v-else class="empty">Nobody is following @{{ username }} yet.</p>
+  </section>
+</template>
+
+<style scoped>
+.crumbs {
+  margin-bottom: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.followers h1 {
+  margin-top: 0;
+}
+
+.follower-list {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.follower-list li a {
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem 1rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.follower-list li a:hover {
+  border-color: var(--color-accent);
+}
+
+.follower-list .name {
+  font-weight: 600;
+}
+
+.follower-list .handle {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.empty {
+  color: var(--color-muted);
+}
+</style>
+~~~~
+
+### Adding the follower count to the profile
+
+Update `app/pages/users/[username]/index.vue` to fetch the count
+and link to the list:
+
+~~~~ vue [app/pages/users/[username]/index.vue]
+<script setup lang="ts">
+import type { User } from "~~/server/db/schema";
+
+const route = useRoute();
+const username = computed(() => route.params.username as string);
+const requestUrl = useRequestURL();
+
+const { data: user, error } = await useFetch<User>(
+  () => `/api/users/${username.value}`,
+);
+
+const { data: followers } = await useFetch<{ total: number }>(
+  () => `/api/users/${username.value}/followers`,
+);
+
+const handle = computed(() =>
+  user.value ? `@${user.value.username}@${requestUrl.host}` : "",
+);
+</script>
+
+<template>
+  <section v-if="user" class="profile">
+    <header class="profile-header">
+      <h1>{{ user.name }}</h1>
+      <p class="handle">{{ handle }}</p>
+      <nav class="stats">
+        <NuxtLink :to="`/users/${username}/followers`">
+          <strong>{{ followers?.total ?? 0 }}</strong>
+          Followers
+        </NuxtLink>
+      </nav>
+    </header>
+  </section>
+  <!-- 'User not found' branch unchanged -->
+</template>
+
+<!-- plus a .stats CSS rule group; see the full file in the example repo. -->
+~~~~
+
+After reloading, Alice's profile now shows the follower count, and
+clicking it jumps to the list:
+
+![Alice's profile with a ’1 Followers'
+link.](./content-sharing/profile-with-follower-count.png)
+
+![The followers page listing the one remote actor that followed
+Alice.](./content-sharing/followers-list.png)
+
+### Exposing the ActivityPub collection
+
+The HTML side is done, but the fediverse side still returns 404 on
+`/users/alice/followers` for ActivityPub clients.  Fix that with a
+followers dispatcher in *server/federation.ts*:
+
+~~~~ typescript [server/federation.ts]
+import { and, eq, sql } from "drizzle-orm"; // [!code highlight]
+// ...
+
+federation
+  .setFollowersDispatcher(
+    "/users/{identifier}/followers",
+    (_ctx, identifier) => {
+      const user = db
+        .select()
+        .from(users)
+        .where(eq(users.username, identifier))
+        .get();
+      if (user == null) return null;
+
+      const rows = db
+        .select()
+        .from(follows)
+        .where(eq(follows.followingUserId, user.id))
+        .all();
+      const items = rows.map((row) => ({
+        id: new URL(row.followerUri),
+        inboxId: new URL(row.followerInbox),
+        endpoints:
+          row.followerSharedInbox == null
+            ? null
+            : { sharedInbox: new URL(row.followerSharedInbox) },
+      }));
+      return { items };
+    },
+  )
+  .setCounter((_ctx, identifier) => {
+    const user = db
+      .select()
+      .from(users)
+      .where(eq(users.username, identifier))
+      .get();
+    if (user == null) return 0;
+    const row = db
+      .select({ count: sql<number>`count(*)` })
+      .from(follows)
+      .where(eq(follows.followingUserId, user.id))
+      .get();
+    return row?.count ?? 0;
+  });
+~~~~
+
+Two pieces:
+
+`setFollowersDispatcher(path, callback)`
+:   Registers the `/users/{identifier}/followers` URL as an
+    ActivityPub collection.  Returning `{ items: [...] }` with one
+    entry per remote follower is enough for Fedify to build the
+    `OrderedCollection` response.  Each item carries the inbox (and
+    optional shared inbox), so when we send an activity later
+    Fedify can look up the right delivery URL without re-fetching
+    the remote actor.
+
+`.setCounter(...)` on the dispatcher
+:   Fills in `totalItems` on the collection response by running a
+    cheap `SELECT count(*)` instead of loading every row.
+
+Finally, advertise the collection URL on the actor itself by adding
+one line to the `new Person({ ... })` call in the actor dispatcher:
+
+~~~~ typescript [server/federation.ts]
+return new Person({
+  // ...
+  followers: ctx.getFollowersUri(identifier),
+  // ...
+});
+~~~~
+
+Look Alice up with the ActivityPub `Accept` header and you'll see a
+`followers` URL on the Person, and `GET`ing that URL returns:
+
+~~~~ json
+{
+  "type": "OrderedCollection",
+  "id": "https://<tunnel>/users/alice/followers",
+  "totalItems": 1,
+  "orderedItems": [
+    "https://<remote-tunnel>/i"
+  ]
+}
+~~~~
+
+Mastodon and other remote servers will now render Alice's follower
+count correctly, and they'll use this collection as one of the
+delivery targets for forwarded content in the future.
