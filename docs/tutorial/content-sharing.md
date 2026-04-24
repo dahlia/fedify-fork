@@ -2775,3 +2775,251 @@ sqlite3 content-sharing.sqlite3 \
 
 The profile page still doesn't render any images; that's the next
 chapter.
+
+
+Image posts: Note dispatcher and JSON endpoints
+-----------------------------------------------
+
+A row in the `posts` table isn't yet an ActivityPub object.  Other
+fediverse servers look at each post through a `Note` object, and
+our upcoming profile grid and post detail pages need plain JSON to
+render HTML from.  Both read the same row, so we write the queries
+once in the server module.
+
+### A `Note` object dispatcher
+
+Mastodon and its friends model image posts as `Create(Note)`, with
+the image carried as a `Document` attachment on the `Note`.  Fedify
+provides `setObjectDispatcher(VocabClass, path, callback)` to serve
+any vocabulary object at a URI template.
+
+Add the polyfill dependency we'll need for the `published` field
+(Node.js 22 hasn't shipped [Temporal] natively yet):
+
+~~~~ sh
+npm install @js-temporal/polyfill
+~~~~
+
+Then extend *server/federation.ts*:
+
+~~~~ typescript [server/federation.ts]
+import {
+  Accept,
+  Document,
+  Endpoints,
+  Follow,
+  Note,
+  PUBLIC_COLLECTION,
+  Person,
+  Undo,
+} from "@fedify/vocab";
+import { Temporal } from "@js-temporal/polyfill";
+// ...
+import { follows, keys, posts, users } from "./db/schema";
+// ...
+
+federation.setObjectDispatcher(
+  Note,
+  "/users/{identifier}/posts/{id}",
+  async (ctx, { identifier, id }) => {
+    const row = db
+      .select({ post: posts, user: users })
+      .from(posts)
+      .innerJoin(users, eq(posts.userId, users.id))
+      .where(and(eq(users.username, identifier), eq(posts.id, id)))
+      .get();
+    if (row == null) return null;
+
+    const noteUri = ctx.getObjectUri(Note, { identifier, id });
+    const attachmentUrl = new URL(
+      `/${row.post.imagePath}`,
+      ctx.canonicalOrigin,
+    );
+    const content = escapeHtml(row.post.caption);
+    return new Note({
+      id: noteUri,
+      attributedTo: ctx.getActorUri(identifier),
+      to: PUBLIC_COLLECTION,
+      cc: ctx.getFollowersUri(identifier),
+      content: row.post.caption === "" ? null : `<p>${content}</p>`,
+      published: sqliteTextToTemporalInstant(row.post.createdAt),
+      url: noteUri,
+      attachments: [
+        new Document({
+          url: attachmentUrl,
+          mediaType: row.post.mediaType,
+        }),
+      ],
+    });
+  },
+);
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function sqliteTextToTemporalInstant(s: string): Temporal.Instant {
+  return Temporal.Instant.from(s.replace(" ", "T") + "Z");
+}
+~~~~
+
+A few things to unpack:
+
+`setObjectDispatcher(Note, path, callback)`
+:   The first argument is the vocabulary class.  Fedify uses it to
+    wire up content negotiation for the URL and to fill in the
+    right JSON-LD type on the response.
+
+`{ identifier, id }` destructuring
+:   Fedify hands the template variables in an object; easier than
+    positional arguments when there's more than one placeholder.
+
+`ctx.getObjectUri(Note, { identifier, id })`
+:   The canonical URL of this object.  Using the helper means we
+    can change the URI template once and have both the `id` field
+    and the `url` field track it automatically.
+
+`to: PUBLIC_COLLECTION` and `cc: ctx.getFollowersUri(identifier)`
+:   ActivityPub audience addressing: `to` lists the public
+    magic-collection (so remote timelines know this is a public
+    post), and `cc` lists Alice's followers collection so remote
+    servers expand delivery to everyone who follows her.
+
+`new Document({ url, mediaType })`
+:   The attachment.  `Document` is the generic ActivityStreams
+    attachment type; Mastodon also accepts `Image`, but using
+    `Document` with an `image/*` media type is the most portable
+    choice.
+
+`content` escaping
+:   We wrap the caption in `<p>...</p>` before sending it out
+    because Mastodon displays `Note.content` as HTML.  Running user
+    input through a tiny `escapeHtml` is enough here; once we add
+    mentions and hashtags we'd switch to a real sanitizer.
+
+`published`
+:   SQLite gives us `'YYYY-MM-DD HH:MM:SS'` (UTC) text; Fedify
+    wants a `Temporal.Instant`.  `sqliteTextToTemporalInstant`
+    turns `'2026-04-24 09:55:58'` into `'2026-04-24T09:55:58Z'`
+    and feeds it to `Temporal.Instant.from`.
+
+[Temporal]: https://tc39.es/proposal-temporal/docs/
+
+### Plain JSON endpoints for the Vue side
+
+The next two chapters render HTML from the same rows, so we expose
+two small Nitro endpoints that return the post as plain JSON.
+
+Create `server/api/users/[username]/posts.get.ts`:
+
+~~~~ typescript [server/api/users/[username]/posts.get.ts]
+import { desc, eq } from "drizzle-orm";
+import { posts, users } from "../../../db/schema";
+import { db } from "../../../utils/db";
+
+export default defineEventHandler((event) => {
+  const username = getRouterParam(event, "username");
+  if (username == null) {
+    throw createError({ statusCode: 400, statusMessage: "Missing username." });
+  }
+  const user = db
+    .select()
+    .from(users)
+    .where(eq(users.username, username))
+    .get();
+  if (user == null) {
+    throw createError({ statusCode: 404, statusMessage: "User not found." });
+  }
+  const rows = db
+    .select({
+      id: posts.id,
+      imagePath: posts.imagePath,
+      mediaType: posts.mediaType,
+      caption: posts.caption,
+      createdAt: posts.createdAt,
+    })
+    .from(posts)
+    .where(eq(posts.userId, user.id))
+    .orderBy(desc(posts.createdAt))
+    .all();
+  return {
+    total: rows.length,
+    items: rows,
+  };
+});
+~~~~
+
+And `server/api/users/[username]/posts/[id].get.ts`:
+
+~~~~ typescript [server/api/users/[username]/posts/[id].get.ts]
+import { and, eq } from "drizzle-orm";
+import { posts, users } from "../../../../db/schema";
+import { db } from "../../../../utils/db";
+
+export default defineEventHandler((event) => {
+  const username = getRouterParam(event, "username");
+  const id = getRouterParam(event, "id");
+  if (username == null || id == null) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: "Missing parameters.",
+    });
+  }
+
+  const row = db
+    .select({
+      id: posts.id,
+      imagePath: posts.imagePath,
+      mediaType: posts.mediaType,
+      caption: posts.caption,
+      createdAt: posts.createdAt,
+      authorUsername: users.username,
+      authorName: users.name,
+    })
+    .from(posts)
+    .innerJoin(users, eq(posts.userId, users.id))
+    .where(and(eq(users.username, username), eq(posts.id, id)))
+    .get();
+  if (row == null) {
+    throw createError({ statusCode: 404, statusMessage: "Post not found." });
+  }
+  return row;
+});
+~~~~
+
+### Trying it out
+
+With a post already in the database from the last chapter, ask for
+its Note through the ActivityPub `Accept` header:
+
+~~~~ sh
+fedify lookup http://localhost:3000/users/alice/posts/<uuid>
+~~~~
+
+~~~~ console
+Note {
+  id: URL 'http://localhost:3000/users/alice/posts/<uuid>',
+  attachment: Document { url: URL '…/uploads/<uuid>.png',
+                         mediaType: 'image/png' },
+  attributedTo: URL 'http://localhost:3000/users/alice',
+  cc: URL 'http://localhost:3000/users/alice/followers',
+  content: '<p>My first image post!</p>',
+  to: URL 'https://www.w3.org/ns/activitystreams#Public',
+  published: 2026-04-24T09:55:58Z,
+  url: URL 'http://localhost:3000/users/alice/posts/<uuid>',
+}
+~~~~
+
+And the plain JSON APIs:
+
+~~~~ sh
+curl http://localhost:3000/api/users/alice/posts | jq .
+curl http://localhost:3000/api/users/alice/posts/<uuid> | jq .
+~~~~
+
+The post is now a fully formed fediverse object, even though it
+still isn't visible from anywhere in the UI.  We'll fix that in the
+next chapter.
