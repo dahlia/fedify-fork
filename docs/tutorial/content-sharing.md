@@ -387,3 +387,199 @@ recipient's *inbox*.  We'll see that in practice soon; Fedify handles the
 HTTP signatures, retries, and so on for us.
 
 [ActivityPub]: https://www.w3.org/TR/activitypub/
+
+
+A minimal app shell
+-------------------
+
+Before we touch Fedify, let's replace the stock Nuxt welcome page with
+an app shell that future chapters can hang pages off.  Three files
+change: *app/app.vue*, a brand-new *app/pages/index.vue*, and *README.md*.
+
+### `app/app.vue`
+
+Open *app/app.vue* and replace the entire file with:
+
+~~~~ vue [app/app.vue]
+<template>
+  <div class="app">
+    <header class="site-header">
+      <NuxtLink to="/" class="site-title">content-sharing</NuxtLink>
+    </header>
+    <main class="site-main">
+      <NuxtPage />
+    </main>
+  </div>
+</template>
+
+<style>
+:root {
+  --color-bg: #fafafa;
+  --color-surface: #ffffff;
+  --color-text: #222;
+  --color-muted: #6b7280;
+  --color-accent: #ff0080;
+  --color-border: #e5e7eb;
+  --radius: 6px;
+  --max-width: 720px;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.5;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.site-header {
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  padding: 0.75rem 1rem;
+}
+
+.site-title {
+  color: var(--color-text);
+  font-weight: 600;
+  font-size: 1.1rem;
+}
+
+.site-main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+}
+</style>
+~~~~
+
+The important pieces:
+
+ -  `<NuxtPage />` is Nuxt's router outlet.  Whatever route the visitor
+    is on, the matching page from *app/pages/* is rendered here.
+ -  The `<style>` block at the bottom isn't `scoped`, so the CSS custom
+    properties on `:root` and the `body` resets apply to the whole site.
+    Every later page can pick colors, spacing, and radii from these
+    variables instead of redefining them.
+ -  The visual style is intentionally minimal.  You don't need to copy
+    pixel-perfect Pixelfed; a tiny amount of CSS is plenty to make the
+    tutorial readable.
+
+> [!TIP]
+> The pink `--color-accent` is the only real flourish.  If you'd like
+> something different, pick any color you like here and the rest of the
+> tutorial will follow along.
+
+### `app/pages/index.vue`
+
+Create the new file *app/pages/index.vue*:
+
+~~~~ vue [app/pages/index.vue]
+<template>
+  <section class="welcome">
+    <h1>Welcome!</h1>
+    <p>
+      This is a tiny, federated image sharing service built with Nuxt
+      and Fedify.  You'll be able to upload images, have people on
+      Mastodon or Pixelfed follow you, and see their posts in your
+      timeline.
+    </p>
+    <p>Nothing is wired up yet; the next chapter adds a database.</p>
+  </section>
+</template>
+
+<style scoped>
+.welcome h1 {
+  margin-top: 0;
+}
+
+.welcome p {
+  color: var(--color-muted);
+}
+</style>
+~~~~
+
+Two things to notice:
+
+ -  `<style scoped>` means the CSS only applies to this page's elements,
+    even though other pages also have `h1` and `p`.  We'll use `scoped`
+    styles for every page from now on.
+ -  Because *index.vue* lives at the root of *app/pages/*, it handles
+    the URL `/`.  Later we'll add *app/pages/setup.vue* for `/setup`,
+    `app/pages/users/[username].vue` for `/users/<anything>`, and so on.
+
+Reload <http://localhost:3000/> (or 3001; adjust as needed) and the stock
+Nuxt welcome page is gone.  You should see something like this:
+
+![The new landing page, rendered through <NuxtPage /> from app/pages/index.vue.](./content-sharing/landing-page.png)
+
+### `README.md`
+
+Finally, rewrite *README.md* so the example repo looks inviting on
+GitHub.  Copy this in:
+
+~~~~ markdown [README.md]
+content-sharing
+===============
+
+A tiny, federated image sharing service, built while following the
+[_Creating your own federated image sharing service_][tutorial]
+tutorial on the Fedify website.
+
+[tutorial]: https://fedify.dev/tutorial/content-sharing
+
+
+Running it locally
+------------------
+
+~~~ sh
+npm install
+npm run dev
+~~~
+
+Nuxt starts on <http://localhost:3000/>.  Expose the port with
+`fedify tunnel 3000` in a second terminal to let other fediverse
+servers reach you.
+
+
+License
+-------
+
+MIT.
+~~~~
+
+That's the whole app shell.  Every subsequent chapter adds exactly the
+files that chapter needs and leaves everything else alone, so your diff
+in each step stays small and readable.
+
+> [!NOTE]
+> All the code in this tutorial is formatted with [Biome], which the
+> scaffold already installed.  You don't need to run Biome yourself
+> while following along; the snippets are pre-formatted.  If you do
+> want to reformat later, run `npx biome check --write .` at the root
+> of the project.
