@@ -1,5 +1,6 @@
 import { mockDocumentLoader, test } from "@fedify/fixture";
 import { CryptographicKey, Multikey } from "@fedify/vocab";
+import { FetchError, UrlError } from "@fedify/vocab-runtime";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   ed25519Multikey,
@@ -709,3 +710,555 @@ test("fetchKey() records the controller an actor document establishes", async ()
   assertEquals(key?.controllerId, new URL(actorId));
   assert(key?.publicKey != null);
 });
+
+for (const cls of [CryptographicKey, Multikey]) {
+  test(`fetchKey() rejects malformed contexts for ${cls.name}`, async () => {
+    const keyId = new URL("https://example.com/users/alice#main-key");
+    const invalidContexts = [
+      {
+        broken: {
+          "@id": "https://example.com/ns#broken",
+          "@type": "not-an-absolute-iri",
+        },
+      },
+      "https://example.com/invalid-context",
+      "not a url",
+      "ctx.jsonld",
+      "https://example.com/non-json-context",
+      "https://example.com/cyclic-context",
+    ];
+    for (const context of invalidContexts) {
+      const cache: Record<string, CryptographicKey | Multikey | null> = {};
+      let loads = 0;
+      const options: FetchKeyOptions = {
+        documentLoader() {
+          loads++;
+          return Promise.resolve({
+            documentUrl: keyId.href,
+            contextUrl: null,
+            document: {
+              "@context": context,
+              id: "https://example.com/users/alice",
+              type: "Person",
+            },
+          });
+        },
+        contextLoader(resource) {
+          return Promise.resolve({
+            documentUrl: new URL(resource).href,
+            contextUrl: null,
+            document: resource.endsWith("non-json-context")
+              ? "<html>"
+              : resource.endsWith("cyclic-context")
+              ? { "@context": resource }
+              : 123,
+          });
+        },
+        keyCache: {
+          get(id) {
+            return Promise.resolve(cache[id.href]);
+          },
+          set(id, key) {
+            cache[id.href] = key;
+            return Promise.resolve();
+          },
+        },
+      };
+      assertEquals(
+        await fetchKey<CryptographicKey | Multikey>(keyId, cls, options),
+        { key: null, cached: false },
+      );
+      assertEquals(cache[keyId.href], null);
+      assertEquals(
+        await fetchKey<CryptographicKey | Multikey>(keyId, cls, options),
+        { key: null, cached: true },
+      );
+      assertEquals(loads, 1);
+    }
+  });
+
+  test(`fetchKey() retries context transport failures for ${cls.name}`, async () => {
+    const keyId = new URL("https://example.com/users/alice#main-key");
+    const contextId = "https://example.com/unavailable-context";
+    for (
+      const error of [
+        new FetchError(contextId),
+        new Error("Network connection lost."),
+        new TypeError("fetch failed"),
+        new TypeError("terminated"),
+        new TypeError("error reading a body from connection"),
+        globalThis.Object.assign(
+          new Error("The socket connection was closed unexpectedly"),
+          { code: "ECONNRESET" },
+        ),
+        globalThis.Object.assign(new Error("Context fetch failed"), {
+          name: "jsonld.InvalidUrl",
+          details: { code: "loading remote context failed" },
+          cause: new FetchError(contextId),
+        }),
+        new TypeError(
+          "error sending request for url (https://example.com/context): connection refused",
+        ),
+        globalThis.Object.assign(new Error("Unable to connect."), {
+          code: "ConnectionRefused",
+          errno: -111,
+        }),
+        ...[
+          ["CERT_HAS_EXPIRED", "certificate has expired"],
+          ["DEPTH_ZERO_SELF_SIGNED_CERT", "self signed certificate"],
+          [
+            "SELF_SIGNED_CERT_IN_CHAIN",
+            "self signed certificate in certificate chain",
+          ],
+          [
+            "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+            "unable to verify the first certificate",
+          ],
+        ].map(([code, message]) =>
+          globalThis.Object.assign(new Error(message), { code })
+        ),
+        new DOMException("Timed out", "TimeoutError"),
+        new UrlError("DNS lookup failed", { reason: "dns" }),
+        new DOMException("Aborted", "AbortError"),
+      ]
+    ) {
+      const cache: Record<string, CryptographicKey | Multikey | null> = {};
+      let loads = 0;
+      let unavailable = true;
+      const key = cls === CryptographicKey
+        ? rsaPublicKey1.clone({
+          id: keyId,
+          owner: new URL("https://example.com/users/alice"),
+        })
+        : ed25519Multikey.clone({
+          id: keyId,
+          controller: new URL("https://example.com/users/alice"),
+        });
+      const keyDocument = await key.toJsonLd({
+        contextLoader: mockDocumentLoader,
+      });
+      const options: FetchKeyOptions = {
+        documentLoader() {
+          loads++;
+          return Promise.resolve({
+            documentUrl: keyId.href,
+            contextUrl: null,
+            document: {
+              "@context": [
+                contextId,
+                "https://www.w3.org/ns/activitystreams",
+                "https://w3id.org/security/v1",
+                "https://w3id.org/security/multikey/v1",
+                "https://www.w3.org/ns/did/v1",
+              ],
+              id: "https://example.com/users/alice",
+              type: "Person",
+              ...(cls === CryptographicKey
+                ? { publicKey: keyDocument }
+                : { assertionMethod: keyDocument }),
+            },
+          });
+        },
+        async contextLoader(resource) {
+          if (resource === contextId) {
+            if (unavailable) throw error;
+            return {
+              documentUrl: resource,
+              contextUrl: null,
+              document: { "@context": {} },
+            };
+          }
+          return await mockDocumentLoader(resource);
+        },
+        keyCache: {
+          get(id) {
+            return Promise.resolve(cache[id.href]);
+          },
+          set(id, value) {
+            cache[id.href] = value;
+            return Promise.resolve();
+          },
+        },
+      };
+      assertEquals(
+        await fetchKey<CryptographicKey | Multikey>(keyId, cls, options),
+        { key: null, cached: false },
+      );
+      assertEquals(
+        await fetchKey<CryptographicKey | Multikey>(keyId, cls, options),
+        { key: null, cached: false },
+      );
+      assertEquals(cache, {});
+      assertEquals(loads, 2);
+      unavailable = false;
+      const recovered = await fetchKey<CryptographicKey | Multikey>(
+        keyId,
+        cls,
+        options,
+      );
+      assertEquals(recovered.key?.id, keyId);
+      assert(recovered.key != null);
+      assertEquals(
+        await exportJwk(recovered.key.publicKey),
+        await exportJwk(key.publicKey!),
+      );
+      assertEquals(recovered.cached, false);
+      assertEquals(loads, 3);
+      assertEquals(
+        (await fetchKey<CryptographicKey | Multikey>(keyId, cls, options))
+          .cached,
+        true,
+      );
+    }
+  });
+
+  test(`fetchKey() propagates context loader bugs for ${cls.name}`, async () => {
+    for (
+      const error of [
+        new Error("Loader bug"),
+        new ReferenceError("Loader bug"),
+        globalThis.Object.assign(new Error("Loader bug"), {
+          code: "EACCES",
+          errno: -13,
+        }),
+        new TypeError("Cannot read properties of undefined"),
+      ]
+    ) {
+      const cache: Record<string, CryptographicKey | Multikey | null> = {};
+      await assertRejects(() =>
+        fetchKey<CryptographicKey | Multikey>("https://example.com/key", cls, {
+          documentLoader(resource) {
+            return Promise.resolve({
+              documentUrl: resource,
+              contextUrl: null,
+              document: {
+                "@context": "https://example.com/context",
+                id: resource,
+                type: "Person",
+              },
+            });
+          },
+          contextLoader() {
+            return Promise.reject(error);
+          },
+          keyCache: {
+            get(id) {
+              return Promise.resolve(cache[id.href]);
+            },
+            set(id, value) {
+              cache[id.href] = value;
+              return Promise.resolve();
+            },
+          },
+        })
+      );
+      assertEquals(cache, {});
+    }
+  });
+}
+
+for (const cls of [CryptographicKey, Multikey]) {
+  test(`fetchKey() handles fallback context errors for ${cls.name}`, async () => {
+    for (const failure of ["invalid", "unavailable", "bug"] as const) {
+      const key = cls === CryptographicKey ? rsaPublicKey1 : ed25519Multikey;
+      const document = await key.toJsonLd({
+        contextLoader: mockDocumentLoader,
+      });
+      const contextId = "https://example.com/fallback-context";
+      const cache: Record<string, CryptographicKey | Multikey | null> = {};
+      let contextLoads = 0;
+      const options: FetchKeyOptions = {
+        documentLoader(resource) {
+          return Promise.resolve({
+            documentUrl: resource,
+            contextUrl: null,
+            document: {
+              ...document as Record<string, unknown>,
+              "@context": [
+                contextId,
+                (document as Record<string, unknown>)["@context"],
+              ].flat(),
+            },
+          });
+        },
+        async contextLoader(resource) {
+          if (resource !== contextId) return await mockDocumentLoader(resource);
+          contextLoads++;
+          if (contextLoads === 2) {
+            if (failure === "unavailable") throw new TypeError("fetch failed");
+            if (failure === "bug") throw new Error("Loader bug");
+            return { documentUrl: resource, contextUrl: null, document: 123 };
+          }
+          return {
+            documentUrl: resource,
+            contextUrl: null,
+            document: { "@context": {} },
+          };
+        },
+        keyCache: {
+          get(id) {
+            return Promise.resolve(cache[id.href]);
+          },
+          set(id, value) {
+            cache[id.href] = value;
+            return Promise.resolve();
+          },
+        },
+      };
+      if (failure === "bug") {
+        await assertRejects(() =>
+          fetchKey<CryptographicKey | Multikey>(key.id!, cls, options)
+        );
+      } else {assertEquals(
+          await fetchKey<CryptographicKey | Multikey>(key.id!, cls, options),
+          { key: null, cached: false },
+        );}
+      assertEquals(contextLoads, 2);
+      assertEquals(
+        cache,
+        failure === "invalid" ? { [key.id!.href]: null } : {},
+      );
+    }
+  });
+
+  test(`fetchKey() handles owner context errors for ${cls.name}`, async () => {
+    for (const failure of ["invalid", "unavailable", "bug"] as const) {
+      const key = cls === CryptographicKey ? rsaPublicKey1 : ed25519Multikey;
+      const ownerId = cls === CryptographicKey
+        ? rsaPublicKey1.ownerId!
+        : ed25519Multikey.controllerId!;
+      const document = await key.toJsonLd({
+        contextLoader: mockDocumentLoader,
+      });
+      const cache: Record<string, CryptographicKey | Multikey | null> = {};
+      let failed = true;
+      const contextId = "https://example.com/owner-context";
+      const options: FetchKeyOptions = {
+        async documentLoader(resource) {
+          if (resource === key.id!.href) {
+            return { documentUrl: resource, contextUrl: null, document };
+          }
+          const owner = await mockDocumentLoader(resource);
+          if (resource !== ownerId.href) return owner;
+          return {
+            ...owner,
+            document: {
+              ...owner.document as Record<string, unknown>,
+              "@context": [
+                contextId,
+                (owner.document as Record<string, unknown>)["@context"],
+              ].flat(),
+            },
+          };
+        },
+        async contextLoader(resource) {
+          if (resource !== contextId) return await mockDocumentLoader(resource);
+          if (failed) {
+            if (failure === "unavailable") throw new TypeError("fetch failed");
+            if (failure === "bug") throw new Error("Loader bug");
+            return { documentUrl: resource, contextUrl: null, document: 123 };
+          }
+          return {
+            documentUrl: resource,
+            contextUrl: null,
+            document: { "@context": {} },
+          };
+        },
+        keyCache: {
+          get(id) {
+            return Promise.resolve(cache[id.href]);
+          },
+          set(id, value) {
+            cache[id.href] = value;
+            return Promise.resolve();
+          },
+        },
+      };
+      if (failure === "bug") {
+        await assertRejects(() =>
+          fetchKey<CryptographicKey | Multikey>(key.id!, cls, options)
+        );
+      } else {assertEquals(
+          await fetchKey<CryptographicKey | Multikey>(key.id!, cls, options),
+          { key: null, cached: false },
+        );}
+      assertEquals(
+        cache,
+        failure === "invalid" ? { [key.id!.href]: null } : {},
+      );
+      if (failure === "unavailable") {
+        failed = false;
+        assertEquals(
+          (await fetchKey<CryptographicKey | Multikey>(key.id!, cls, options))
+            .key?.id,
+          key.id,
+        );
+      }
+    }
+  });
+}
+
+for (const cls of [CryptographicKey, Multikey]) {
+  test(`fetchKey() retries referenced key context failures for ${cls.name}`, async () => {
+    const actorId = new URL("https://example.com/users/alice");
+    const keyId = new URL("#main-key", actorId);
+    const keyDocumentUrl = "https://example.com/key-document";
+    const contextId = "https://example.com/key-context";
+    const key = cls === CryptographicKey
+      ? rsaPublicKey1.clone({ id: keyId, owner: actorId })
+      : ed25519Multikey.clone({ id: keyId, controller: actorId });
+    const document = await key.toJsonLd({ contextLoader: mockDocumentLoader });
+    const cache: Record<string, CryptographicKey | Multikey | null> = {};
+    let unavailable = true;
+    let keyLoads = 0;
+    const options: FetchKeyOptions = {
+      documentLoader(resource) {
+        if (resource === keyDocumentUrl) {
+          keyLoads++;
+          return Promise.resolve({
+            documentUrl: resource,
+            contextUrl: null,
+            document: {
+              ...document as Record<string, unknown>,
+              "@context": [
+                contextId,
+                (document as Record<string, unknown>)["@context"],
+              ].flat(),
+            },
+          });
+        }
+        return Promise.resolve({
+          documentUrl: resource,
+          contextUrl: null,
+          document: {
+            "@context": [
+              "https://www.w3.org/ns/activitystreams",
+              "https://w3id.org/security/v1",
+              "https://www.w3.org/ns/did/v1",
+            ],
+            id: actorId.href,
+            type: "Person",
+            ...(cls === CryptographicKey
+              ? { publicKey: keyDocumentUrl }
+              : { assertionMethod: keyDocumentUrl }),
+          },
+        });
+      },
+      async contextLoader(resource) {
+        if (resource !== contextId) return await mockDocumentLoader(resource);
+        if (unavailable) throw new TypeError("fetch failed");
+        return {
+          documentUrl: resource,
+          contextUrl: null,
+          document: { "@context": {} },
+        };
+      },
+      keyCache: {
+        get(id) {
+          return Promise.resolve(cache[id.href]);
+        },
+        set(id, value) {
+          cache[id.href] = value;
+          return Promise.resolve();
+        },
+      },
+    };
+    assertEquals(
+      await fetchKey<CryptographicKey | Multikey>(keyId, cls, options),
+      { key: null, cached: false },
+    );
+    assertEquals(cache, {});
+    unavailable = false;
+    assertEquals(
+      (await fetchKey<CryptographicKey | Multikey>(keyId, cls, options)).key
+        ?.id,
+      keyId,
+    );
+    assertEquals(keyLoads, 2);
+  });
+}
+
+for (const cls of [CryptographicKey, Multikey]) {
+  test(`fetchKey() handles string documents for ${cls.name}`, async () => {
+    for (const location of ["key", "owner"] as const) {
+      for (const failure of ["unavailable", "invalid", "bug"] as const) {
+        const key = cls === CryptographicKey ? rsaPublicKey1 : ed25519Multikey;
+        const ownerId = cls === CryptographicKey
+          ? rsaPublicKey1.ownerId!
+          : ed25519Multikey.controllerId!;
+        const document = await key.toJsonLd({
+          contextLoader: mockDocumentLoader,
+        });
+        const contextId = "https://example.com/string-document";
+        const cache: Record<string, CryptographicKey | Multikey | null> = {};
+        let failed = true;
+        let contextLoads = 0;
+        const options: FetchKeyOptions = {
+          async documentLoader(resource) {
+            const result = resource === key.id!.href
+              ? { documentUrl: resource, contextUrl: null, document }
+              : await mockDocumentLoader(resource);
+            if (
+              failed &&
+              resource === (location === "key" ? key.id! : ownerId).href
+            ) {
+              return { ...result, document: contextId };
+            }
+            return result;
+          },
+          async contextLoader(resource) {
+            if (resource !== contextId) {
+              return await mockDocumentLoader(resource);
+            }
+            contextLoads++;
+            if (failure === "unavailable") throw new FetchError(resource);
+            if (failure === "invalid") {
+              throw new UrlError("Private address", { reason: "disallowed" });
+            }
+            throw new Error("Loader bug");
+          },
+          keyCache: {
+            get(id) {
+              return Promise.resolve(cache[id.href]);
+            },
+            set(id, value) {
+              cache[id.href] = value;
+              return Promise.resolve();
+            },
+          },
+        };
+        if (failure === "bug") {
+          await assertRejects(
+            () => fetchKey<CryptographicKey | Multikey>(key.id!, cls, options),
+            Error,
+            "Loader bug",
+          );
+          assertEquals(cache, {});
+          assertEquals(contextLoads, 1);
+          continue;
+        }
+        assertEquals(
+          await fetchKey<CryptographicKey | Multikey>(key.id!, cls, options),
+          { key: null, cached: false },
+        );
+        assertEquals(
+          cache,
+          failure === "invalid" ? { [key.id!.href]: null } : {},
+        );
+        assertEquals(
+          await fetchKey<CryptographicKey | Multikey>(key.id!, cls, options),
+          { key: null, cached: failure === "invalid" },
+        );
+        assertEquals(contextLoads, failure === "invalid" ? 1 : 2);
+        if (failure === "unavailable") {
+          failed = false;
+          assertEquals(
+            (await fetchKey<CryptographicKey | Multikey>(key.id!, cls, options))
+              .key?.id,
+            key.id,
+          );
+        }
+      }
+    }
+  });
+}

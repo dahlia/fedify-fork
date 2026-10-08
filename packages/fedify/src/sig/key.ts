@@ -5,7 +5,12 @@ import {
   type Multikey,
   Object,
 } from "@fedify/vocab";
-import { type DocumentLoader, getDocumentLoader } from "@fedify/vocab-runtime";
+import {
+  type DocumentLoader,
+  FetchError,
+  getDocumentLoader,
+  UrlError,
+} from "@fedify/vocab-runtime";
 import { getLogger } from "@logtape/logtape";
 import {
   SpanKind,
@@ -14,6 +19,118 @@ import {
   type TracerProvider,
 } from "@opentelemetry/api";
 import metadata from "../../deno.json" with { type: "json" };
+
+type KeyContextError = "invalid" | "unavailable";
+
+function classifyContextLoaderError(
+  error: unknown,
+): KeyContextError | undefined {
+  if (
+    error instanceof FetchError ||
+    (error instanceof Error && error.name === "FetchError")
+  ) return "unavailable";
+  if (
+    error instanceof UrlError ||
+    (error instanceof Error && error.name === "UrlError")
+  ) {
+    return (error as Error & { reason?: unknown }).reason === "dns"
+      ? "unavailable"
+      : "invalid";
+  }
+  if (error instanceof Error) {
+    // workerd uses a plain Error for failed fetches and interrupted bodies.
+    if (
+      error.name === "Error" && error.message === "Network connection lost."
+    ) {
+      return "unavailable";
+    }
+    const code = (error as Error & { code?: unknown }).code;
+    if (
+      typeof code === "string" && [
+        "ConnectionRefused",
+        "ConnectionReset",
+        "ECONNREFUSED",
+        "ECONNRESET",
+        "ETIMEDOUT",
+        "ENOTFOUND",
+        "EAI_AGAIN",
+        "EHOSTUNREACH",
+        "ENETUNREACH",
+        // Bun exposes certificate validation failures as plain Error codes.
+        "UNABLE_TO_GET_ISSUER_CERT",
+        "UNABLE_TO_GET_CRL",
+        "UNABLE_TO_DECRYPT_CERT_SIGNATURE",
+        "UNABLE_TO_DECRYPT_CRL_SIGNATURE",
+        "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY",
+        "CERT_SIGNATURE_FAILURE",
+        "CRL_SIGNATURE_FAILURE",
+        "CERT_NOT_YET_VALID",
+        "CERT_HAS_EXPIRED",
+        "CRL_NOT_YET_VALID",
+        "CRL_HAS_EXPIRED",
+        "ERROR_IN_CERT_NOT_BEFORE_FIELD",
+        "ERROR_IN_CERT_NOT_AFTER_FIELD",
+        "ERROR_IN_CRL_LAST_UPDATE_FIELD",
+        "ERROR_IN_CRL_NEXT_UPDATE_FIELD",
+        "DEPTH_ZERO_SELF_SIGNED_CERT",
+        "SELF_SIGNED_CERT_IN_CHAIN",
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "CERT_CHAIN_TOO_LONG",
+        "CERT_REVOKED",
+        "INVALID_CA",
+        "PATH_LENGTH_EXCEEDED",
+        "INVALID_PURPOSE",
+        "CERT_UNTRUSTED",
+        "CERT_REJECTED",
+        "HOSTNAME_MISMATCH",
+      ].includes(code)
+    ) return "unavailable";
+    if (
+      error instanceof TypeError && (code === "ERR_INVALID_URL" ||
+        /^(Invalid URL(?::| string\.$)|Failed to parse URL from |fetch\(\) URL is invalid$)/
+          .test(error.message))
+    ) {
+      return "invalid";
+    }
+    if (error.name === "AbortError" || error.name === "TimeoutError") {
+      return "unavailable";
+    }
+    // Native fetch() rejects with TypeError, which loaders can also throw
+    // for programming mistakes. Only recognize the runtime's fetch messages.
+    if (
+      error instanceof TypeError &&
+      /^(fetch failed$|terminated$|error reading a body from connection$|Failed to fetch$|Load failed$|NetworkError when attempting to fetch resource\.$|error sending request for url \()/
+        .test(error.message)
+    ) {
+      return "unavailable";
+    }
+  }
+  return undefined;
+}
+
+function classifyKeyContextError(error: unknown): KeyContextError | undefined {
+  const seen = new Set<unknown>();
+  while (error instanceof Error && error.name.startsWith("jsonld.")) {
+    if (seen.has(error) || seen.size >= 16) return undefined;
+    seen.add(error);
+    const details = (error as Error & {
+      details?: { code?: unknown; cause?: unknown };
+    }).details;
+    if (details?.code !== "loading remote context failed") return "invalid";
+    const cause = error.cause ?? details?.cause;
+    // A context overflow can use this code without a loader failure.
+    if (cause == null) return "invalid";
+    if (cause instanceof Error && cause.name.startsWith("jsonld.")) {
+      error = cause;
+      continue;
+    }
+    // jsonld also parses string-valued remote documents as JSON.
+    if (cause instanceof SyntaxError) return "invalid";
+    return classifyContextLoaderError(cause);
+  }
+  return undefined;
+}
 
 /**
  * Checks if the given key is valid and supported.  No-op if the key is valid,
@@ -245,7 +362,13 @@ export async function fetchActorDocument(
       baseUrl: documentUrl,
     });
   } catch (error) {
-    if (!(error instanceof TypeError)) throw error;
+    const contextError = classifyKeyContextError(error) ??
+      (typeof document === "string"
+        ? classifyContextLoaderError(error)
+        : undefined);
+    if (
+      !(error instanceof TypeError) && contextError == null
+    ) throw error;
     logger.debug(
       "The document served at {documentUrl} is not a valid object: {error}",
       { documentUrl: documentUrl.href, error },
@@ -417,6 +540,23 @@ async function fetchKeyInternal<T extends CryptographicKey | Multikey>(
     {},
 ): Promise<FetchKeyResult<T>> {
   const logger = getLogger(["fedify", "sig", "key"]);
+  // Owner resolution returns null on a context outage too. Remember that
+  // failure so a retryable outage does not become an invalid-key cache entry.
+  let contextUnavailable = false;
+  const loadContext = contextLoader ?? getDocumentLoader();
+  contextLoader = async (url) => {
+    try {
+      return await loadContext(url);
+    } catch (error) {
+      if (
+        (classifyKeyContextError(error) ??
+          classifyContextLoaderError(error)) === "unavailable"
+      ) {
+        contextUnavailable = true;
+      }
+      throw error;
+    }
+  };
   const cacheKey = typeof keyId === "string" ? new URL(keyId) : keyId;
   keyId = typeof keyId === "string" ? keyId : keyId.href;
   if (keyCache != null) {
@@ -447,35 +587,40 @@ async function fetchKeyInternal<T extends CryptographicKey | Multikey>(
     documentUrl = new URL(remoteDocument.documentUrl ?? "", cacheKey);
   } catch (_) {
     logger.debug("Failed to fetch key {keyId}.", { keyId });
-    await keyCache?.set(cacheKey, null);
+    if (!contextUnavailable) await keyCache?.set(cacheKey, null);
     return { key: null, cached: false };
   }
   let object: Object | T;
   try {
-    object = await Object.fromJsonLd(document, {
-      documentLoader,
-      contextLoader,
-      tracerProvider,
-    });
-  } catch (e) {
-    if (!(e instanceof TypeError)) throw e;
     try {
+      object = await Object.fromJsonLd(document, {
+        documentLoader,
+        contextLoader,
+        tracerProvider,
+      });
+    } catch (error) {
+      // A standalone key is not an ActivityStreams Object. Only a type
+      // mismatch needs the key decoder; JSON-LD expansion errors do not.
+      if (!(error instanceof TypeError)) throw error;
       object = await cls.fromJsonLd(document, {
         documentLoader,
         contextLoader,
         tracerProvider,
       });
-    } catch (e) {
-      if (e instanceof TypeError) {
-        logger.debug(
-          "Failed to verify; key {keyId} returned an invalid object.",
-          { keyId },
-        );
-        await keyCache?.set(cacheKey, null);
-        return { key: null, cached: false };
-      }
-      throw e;
     }
+  } catch (error) {
+    // jsonld treats string documents as URLs and loads them without wrapping
+    // loader failures in a jsonld.InvalidUrl error.
+    const contextError = classifyKeyContextError(error) ??
+      (typeof document === "string"
+        ? classifyContextLoaderError(error)
+        : undefined);
+    if (!(error instanceof TypeError) && contextError == null) throw error;
+    logger.debug("Failed to decode key {keyId}: {error}", { keyId, error });
+    if (contextError !== "unavailable" && !contextUnavailable) {
+      await keyCache?.set(cacheKey, null);
+    }
+    return { key: null, cached: false };
   }
   let key: T | null = null;
   // Set when the fetched document turned out to be the owner's own actor
@@ -502,7 +647,7 @@ async function fetchKeyInternal<T extends CryptographicKey | Multikey>(
           "the actor {actorId}, which belongs to another origin.",
         { keyId, documentUrl: documentUrl.href, actorId: object.id?.href },
       );
-      await keyCache?.set(cacheKey, null);
+      if (!contextUnavailable) await keyCache?.set(cacheKey, null);
       return { key: null, cached: false };
     }
     ownerDocument = object;
@@ -550,7 +695,7 @@ async function fetchKeyInternal<T extends CryptographicKey | Multikey>(
           "but has no key matching {keyId}.",
         { keyId, actorType: object.constructor.name },
       );
-      await keyCache?.set(cacheKey, null);
+      if (!contextUnavailable) await keyCache?.set(cacheKey, null);
       return { key: null, cached: false };
     }
   } else {
@@ -558,7 +703,7 @@ async function fetchKeyInternal<T extends CryptographicKey | Multikey>(
       "Failed to verify; key {keyId} returned an invalid object.",
       { keyId },
     );
-    await keyCache?.set(cacheKey, null);
+    if (!contextUnavailable) await keyCache?.set(cacheKey, null);
     return { key: null, cached: false };
   }
   if (key.publicKey == null) {
@@ -566,7 +711,7 @@ async function fetchKeyInternal<T extends CryptographicKey | Multikey>(
       "Failed to verify; key {keyId} has no publicKeyPem field.",
       { keyId },
     );
-    await keyCache?.set(cacheKey, null);
+    if (!contextUnavailable) await keyCache?.set(cacheKey, null);
     return { key: null, cached: false };
   }
   // Whom the key belongs to has to be settled here, before any caller can act
@@ -604,7 +749,7 @@ async function fetchKeyInternal<T extends CryptographicKey | Multikey>(
           "claims does not list the key as its own.",
         { keyId, claimedOwnerId: claimedOwnerId.href },
       );
-      await keyCache?.set(cacheKey, null);
+      if (!contextUnavailable) await keyCache?.set(cacheKey, null);
       return { key: null, cached: false };
     }
   }
