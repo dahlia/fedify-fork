@@ -101,9 +101,10 @@ async function testCompatibility(testCase: CompatibilityCase): Promise<void> {
           pnpm: {
             overrides: {
               ...Object.fromEntries(tarballs),
-              // Version 1.2.0 requires @emnapi/* 2.0 prereleases, while its
-              // consumers still provide @emnapi/* 1.x.
-              "@napi-rs/wasm-runtime@^1.1.6": "1.1.6",
+              // Consumers provide either @emnapi/* 1.x or 2.0 prereleases, and
+              // versions in between accept only one of them, while this one
+              // accepts both.
+              "@napi-rs/wasm-runtime@^1.1.6": "1.2.7",
             },
           },
         },
