@@ -481,25 +481,31 @@ function expandKey(
   return iris;
 }
 
+// Only the first entry of a context can declare that it does not propagate:
+function isNonPropagatingContext(context: unknown): boolean {
+  const first = globalThis.Array.isArray(context) ? context[0] : context;
+  return first != null && typeof first === "object" &&
+    (first as Record<string, unknown>)["@propagate"] === false;
+}
+
 // Whether the embedded documents under a key of a compacted document can be
 // decoded again in place of the values decoded for a property.  The document
 // has to map the key, and no other key, to the property, as a context can
 // remap the key or map another term to the property, in which case the cached
 // documents cannot be matched with the decoded values.  An inline context
-// that does not propagate to embedded nodes, which only the first entry can
-// declare, rules it out as well, since the context the embedded documents
-// were decoded with cannot be rebuilt:
+// that does not propagate to embedded nodes, in the document or in the
+// embedded document, rules it out as well, since prepending another context
+// cannot rebuild the contexts they were decoded with:
 async function isCachedPropertyKey(
   document: Record<string, unknown>,
+  embedded: object,
   key: string,
   iris: readonly string[],
   contextLoader: DocumentLoader,
 ): Promise<boolean> {
-  const context = document["@context"];
-  const first = globalThis.Array.isArray(context) ? context[0] : context;
   if (
-    first != null && typeof first === "object" &&
-    (first as Record<string, unknown>)["@propagate"] === false
+    isNonPropagatingContext(document["@context"]) ||
+    isNonPropagatingContext((embedded as { "@context"?: unknown })["@context"])
   ) {
     return false;
   }
@@ -6427,6 +6433,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "attachment",
                     ["https://www.w3.org/ns/activitystreams#attachment"],
                     options.contextLoader ?? this._contextLoader ??
@@ -6923,6 +6930,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "attributedTo",
                   ["https://www.w3.org/ns/activitystreams#attributedTo"],
                   options.contextLoader ?? this._contextLoader ??
@@ -7100,6 +7108,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "attributedTo",
                     ["https://www.w3.org/ns/activitystreams#attributedTo"],
                     options.contextLoader ?? this._contextLoader ??
@@ -7535,6 +7544,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "audience",
                   ["https://www.w3.org/ns/activitystreams#audience"],
                   options.contextLoader ?? this._contextLoader ??
@@ -7711,6 +7721,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "audience",
                     ["https://www.w3.org/ns/activitystreams#audience"],
                     options.contextLoader ?? this._contextLoader ??
@@ -8199,6 +8210,7 @@ get contents(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "context",
                     ["https://www.w3.org/ns/activitystreams#context"],
                     options.contextLoader ?? this._contextLoader ??
@@ -8694,6 +8706,7 @@ get names(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "generator",
                     ["https://www.w3.org/ns/activitystreams#generator"],
                     options.contextLoader ?? this._contextLoader ??
@@ -9152,6 +9165,7 @@ get names(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "icon",
                   ["https://www.w3.org/ns/activitystreams#icon"],
                   options.contextLoader ?? this._contextLoader ??
@@ -9329,6 +9343,7 @@ get names(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "icon",
                     ["https://www.w3.org/ns/activitystreams#icon"],
                     options.contextLoader ?? this._contextLoader ??
@@ -9787,6 +9802,7 @@ get names(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "image",
                   ["https://www.w3.org/ns/activitystreams#image"],
                   options.contextLoader ?? this._contextLoader ??
@@ -9964,6 +9980,7 @@ get names(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "image",
                     ["https://www.w3.org/ns/activitystreams#image"],
                     options.contextLoader ?? this._contextLoader ??
@@ -10414,6 +10431,7 @@ get names(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "inReplyTo",
                   ["https://www.w3.org/ns/activitystreams#inReplyTo"],
                   options.contextLoader ?? this._contextLoader ??
@@ -10590,6 +10608,7 @@ get names(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "inReplyTo",
                     ["https://www.w3.org/ns/activitystreams#inReplyTo"],
                     options.contextLoader ?? this._contextLoader ??
@@ -11040,6 +11059,7 @@ get names(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "location",
                   ["https://www.w3.org/ns/activitystreams#location"],
                   options.contextLoader ?? this._contextLoader ??
@@ -11216,6 +11236,7 @@ get names(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "location",
                     ["https://www.w3.org/ns/activitystreams#location"],
                     options.contextLoader ?? this._contextLoader ??
@@ -11665,6 +11686,7 @@ get names(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "preview",
                   ["https://www.w3.org/ns/activitystreams#preview"],
                   options.contextLoader ?? this._contextLoader ??
@@ -11840,6 +11862,7 @@ get names(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "preview",
                     ["https://www.w3.org/ns/activitystreams#preview"],
                     options.contextLoader ?? this._contextLoader ??
@@ -12288,6 +12311,7 @@ get names(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "replies",
                   ["https://www.w3.org/ns/activitystreams#replies"],
                   options.contextLoader ?? this._contextLoader ??
@@ -12728,6 +12752,7 @@ get names(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "shares",
                   ["https://www.w3.org/ns/activitystreams#shares"],
                   options.contextLoader ?? this._contextLoader ??
@@ -13168,6 +13193,7 @@ get names(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "likes",
                   ["https://www.w3.org/ns/activitystreams#likes"],
                   options.contextLoader ?? this._contextLoader ??
@@ -13602,6 +13628,7 @@ get names(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "emojiReactions",
                   ["http://fedibird.com/ns#emojiReactions"],
                   options.contextLoader ?? this._contextLoader ??
@@ -14097,6 +14124,7 @@ get summaries(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "tag",
                     ["https://www.w3.org/ns/activitystreams#tag"],
                     options.contextLoader ?? this._contextLoader ??
@@ -14566,6 +14594,7 @@ get urls(): ((URL | Link))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "to",
                   ["https://www.w3.org/ns/activitystreams#to"],
                   options.contextLoader ?? this._contextLoader ??
@@ -14742,6 +14771,7 @@ get urls(): ((URL | Link))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "to",
                     ["https://www.w3.org/ns/activitystreams#to"],
                     options.contextLoader ?? this._contextLoader ??
@@ -15177,6 +15207,7 @@ get urls(): ((URL | Link))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "bto",
                   ["https://www.w3.org/ns/activitystreams#bto"],
                   options.contextLoader ?? this._contextLoader ??
@@ -15353,6 +15384,7 @@ get urls(): ((URL | Link))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "bto",
                     ["https://www.w3.org/ns/activitystreams#bto"],
                     options.contextLoader ?? this._contextLoader ??
@@ -15788,6 +15820,7 @@ get urls(): ((URL | Link))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "cc",
                   ["https://www.w3.org/ns/activitystreams#cc"],
                   options.contextLoader ?? this._contextLoader ??
@@ -15964,6 +15997,7 @@ get urls(): ((URL | Link))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "cc",
                     ["https://www.w3.org/ns/activitystreams#cc"],
                     options.contextLoader ?? this._contextLoader ??
@@ -16399,6 +16433,7 @@ get urls(): ((URL | Link))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "bcc",
                   ["https://www.w3.org/ns/activitystreams#bcc"],
                   options.contextLoader ?? this._contextLoader ??
@@ -16575,6 +16610,7 @@ get urls(): ((URL | Link))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "bcc",
                     ["https://www.w3.org/ns/activitystreams#bcc"],
                     options.contextLoader ?? this._contextLoader ??
@@ -17073,6 +17109,7 @@ get urls(): ((URL | Link))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "proof",
                   ["https://w3id.org/security#proof"],
                   options.contextLoader ?? this._contextLoader ??
@@ -17248,6 +17285,7 @@ get urls(): ((URL | Link))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "proof",
                     ["https://w3id.org/security#proof"],
                     options.contextLoader ?? this._contextLoader ??
@@ -17722,6 +17760,7 @@ get urls(): ((URL | Link))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "likeAuthorization",
                   ["https://gotosocial.org/ns#likeAuthorization"],
                   options.contextLoader ?? this._contextLoader ??
@@ -18156,6 +18195,7 @@ get urls(): ((URL | Link))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "replyAuthorization",
                   ["https://gotosocial.org/ns#replyAuthorization"],
                   options.contextLoader ?? this._contextLoader ??
@@ -18590,6 +18630,7 @@ get urls(): ((URL | Link))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "announceAuthorization",
                   ["https://gotosocial.org/ns#announceAuthorization"],
                   options.contextLoader ?? this._contextLoader ??
@@ -25151,6 +25192,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "quote",
                   ["https://w3id.org/fep/044f#quote"],
                   options.contextLoader ?? this._contextLoader ??
@@ -25608,6 +25650,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "quoteAuthorization",
                   ["https://w3id.org/fep/044f#quoteAuthorization"],
                   options.contextLoader ?? this._contextLoader ??
@@ -28133,6 +28176,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "actor",
                   ["https://www.w3.org/ns/activitystreams#actor"],
                   options.contextLoader ?? this._contextLoader ??
@@ -28310,6 +28354,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "actor",
                     ["https://www.w3.org/ns/activitystreams#actor"],
                     options.contextLoader ?? this._contextLoader ??
@@ -28746,6 +28791,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "object",
                   ["https://www.w3.org/ns/activitystreams#object"],
                   options.contextLoader ?? this._contextLoader ??
@@ -28923,6 +28969,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "object",
                     ["https://www.w3.org/ns/activitystreams#object"],
                     options.contextLoader ?? this._contextLoader ??
@@ -29362,6 +29409,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "target",
                   ["https://www.w3.org/ns/activitystreams#target"],
                   options.contextLoader ?? this._contextLoader ??
@@ -29542,6 +29590,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "target",
                     ["https://www.w3.org/ns/activitystreams#target"],
                     options.contextLoader ?? this._contextLoader ??
@@ -29978,6 +30027,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "result",
                   ["https://www.w3.org/ns/activitystreams#result"],
                   options.contextLoader ?? this._contextLoader ??
@@ -30155,6 +30205,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "result",
                     ["https://www.w3.org/ns/activitystreams#result"],
                     options.contextLoader ?? this._contextLoader ??
@@ -30592,6 +30643,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "origin",
                   ["https://www.w3.org/ns/activitystreams#origin"],
                   options.contextLoader ?? this._contextLoader ??
@@ -30770,6 +30822,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "origin",
                     ["https://www.w3.org/ns/activitystreams#origin"],
                     options.contextLoader ?? this._contextLoader ??
@@ -31205,6 +31258,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "instrument",
                   ["https://www.w3.org/ns/activitystreams#instrument"],
                   options.contextLoader ?? this._contextLoader ??
@@ -31381,6 +31435,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "instrument",
                     ["https://www.w3.org/ns/activitystreams#instrument"],
                     options.contextLoader ?? this._contextLoader ??
@@ -35724,6 +35779,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactingObject",
                   ["https://gotosocial.org/ns#interactingObject"],
                   options.contextLoader ?? this._contextLoader ??
@@ -36157,6 +36213,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactionTarget",
                   ["https://gotosocial.org/ns#interactionTarget"],
                   options.contextLoader ?? this._contextLoader ??
@@ -40783,6 +40840,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactingObject",
                   ["https://gotosocial.org/ns#interactingObject"],
                   options.contextLoader ?? this._contextLoader ??
@@ -41216,6 +41274,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactionTarget",
                   ["https://gotosocial.org/ns#interactionTarget"],
                   options.contextLoader ?? this._contextLoader ??
@@ -43145,6 +43204,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactingObject",
                   ["https://gotosocial.org/ns#interactingObject"],
                   options.contextLoader ?? this._contextLoader ??
@@ -43578,6 +43638,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactionTarget",
                   ["https://gotosocial.org/ns#interactionTarget"],
                   options.contextLoader ?? this._contextLoader ??
@@ -45506,6 +45567,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactingObject",
                   ["https://gotosocial.org/ns#interactingObject"],
                   options.contextLoader ?? this._contextLoader ??
@@ -45939,6 +46001,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactionTarget",
                   ["https://gotosocial.org/ns#interactionTarget"],
                   options.contextLoader ?? this._contextLoader ??
@@ -48505,6 +48568,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "translator",
                   ["https://schema.org/translator"],
                   options.contextLoader ?? this._contextLoader ??
@@ -48685,6 +48749,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "translator",
                     ["https://schema.org/translator"],
                     options.contextLoader ?? this._contextLoader ??
@@ -50546,6 +50611,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactingObject",
                   ["https://gotosocial.org/ns#interactingObject"],
                   options.contextLoader ?? this._contextLoader ??
@@ -50978,6 +51044,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "interactionTarget",
                   ["https://gotosocial.org/ns#interactionTarget"],
                   options.contextLoader ?? this._contextLoader ??
@@ -53895,6 +53962,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "current",
                   ["https://www.w3.org/ns/activitystreams#current"],
                   options.contextLoader ?? this._contextLoader ??
@@ -54329,6 +54397,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "first",
                   ["https://www.w3.org/ns/activitystreams#first"],
                   options.contextLoader ?? this._contextLoader ??
@@ -54763,6 +54832,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "last",
                   ["https://www.w3.org/ns/activitystreams#last"],
                   options.contextLoader ?? this._contextLoader ??
@@ -55216,6 +55286,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "items",
                     ["https://www.w3.org/ns/activitystreams#items"],
                     options.contextLoader ?? this._contextLoader ??
@@ -55650,6 +55721,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "likesOf",
                   ["https://w3id.org/fep/5711#likesOf"],
                   options.contextLoader ?? this._contextLoader ??
@@ -56083,6 +56155,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "sharesOf",
                   ["https://w3id.org/fep/5711#sharesOf"],
                   options.contextLoader ?? this._contextLoader ??
@@ -56516,6 +56589,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "repliesOf",
                   ["https://w3id.org/fep/5711#repliesOf"],
                   options.contextLoader ?? this._contextLoader ??
@@ -56949,6 +57023,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "inboxOf",
                   ["https://w3id.org/fep/5711#inboxOf"],
                   options.contextLoader ?? this._contextLoader ??
@@ -57382,6 +57457,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "outboxOf",
                   ["https://w3id.org/fep/5711#outboxOf"],
                   options.contextLoader ?? this._contextLoader ??
@@ -57815,6 +57891,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "followersOf",
                   ["https://w3id.org/fep/5711#followersOf"],
                   options.contextLoader ?? this._contextLoader ??
@@ -58248,6 +58325,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "followingOf",
                   ["https://w3id.org/fep/5711#followingOf"],
                   options.contextLoader ?? this._contextLoader ??
@@ -58681,6 +58759,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "likedOf",
                   ["https://w3id.org/fep/5711#likedOf"],
                   options.contextLoader ?? this._contextLoader ??
@@ -61290,6 +61369,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "orderedItems",
                     ["https://www.w3.org/ns/activitystreams#items"],
                     options.contextLoader ?? this._contextLoader ??
@@ -63488,6 +63568,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredObject",
                   ["https://w3id.org/fep/7aa9#featuredObject"],
                   options.contextLoader ?? this._contextLoader ??
@@ -63922,6 +64003,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featureAuthorization",
                   ["https://w3id.org/fep/7aa9#featureAuthorization"],
                   options.contextLoader ?? this._contextLoader ??
@@ -68544,6 +68626,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "owner",
                   ["https://w3id.org/security#owner"],
                   options.contextLoader ?? this._contextLoader ??
@@ -70097,6 +70180,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "controller",
                   ["https://w3id.org/security#controller"],
                   options.contextLoader ?? this._contextLoader ??
@@ -80434,6 +80518,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "publicKey",
                   ["https://w3id.org/security#publicKey"],
                   options.contextLoader ?? this._contextLoader ??
@@ -80608,6 +80693,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "publicKey",
                     ["https://w3id.org/security#publicKey"],
                     options.contextLoader ?? this._contextLoader ??
@@ -81045,6 +81131,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "assertionMethod",
                   ["https://w3id.org/security#assertionMethod"],
                   options.contextLoader ?? this._contextLoader ??
@@ -81223,6 +81310,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "assertionMethod",
                     ["https://w3id.org/security#assertionMethod"],
                     options.contextLoader ?? this._contextLoader ??
@@ -81730,6 +81818,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "inbox",
                   ["http://www.w3.org/ns/ldp#inbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -82187,6 +82276,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "outbox",
                   ["https://www.w3.org/ns/activitystreams#outbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -82624,6 +82714,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "following",
                   ["https://www.w3.org/ns/activitystreams#following"],
                   options.contextLoader ?? this._contextLoader ??
@@ -83064,6 +83155,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "followers",
                   ["https://www.w3.org/ns/activitystreams#followers"],
                   options.contextLoader ?? this._contextLoader ??
@@ -83502,6 +83594,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "liked",
                   ["https://www.w3.org/ns/activitystreams#liked"],
                   options.contextLoader ?? this._contextLoader ??
@@ -83938,6 +84031,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featured",
                   ["http://joinmastodon.org/ns#featured"],
                   options.contextLoader ?? this._contextLoader ??
@@ -84374,6 +84468,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredTags",
                   ["http://joinmastodon.org/ns#featuredTags"],
                   options.contextLoader ?? this._contextLoader ??
@@ -84807,6 +84902,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredCollections",
                   ["https://w3id.org/fep/7aa9#featuredCollections"],
                   options.contextLoader ?? this._contextLoader ??
@@ -85244,6 +85340,7 @@ get gateways(): (URL)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "streams",
                     ["https://www.w3.org/ns/activitystreams#streams"],
                     options.contextLoader ?? this._contextLoader ??
@@ -85823,6 +85920,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "movedTo",
                   ["https://www.w3.org/ns/activitystreams#movedTo"],
                   options.contextLoader ?? this._contextLoader ??
@@ -86319,6 +86417,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "alsoKnownAs",
                   ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                   options.contextLoader ?? this._contextLoader ??
@@ -86497,6 +86596,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "alsoKnownAs",
                     ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                     options.contextLoader ?? this._contextLoader ??
@@ -86934,6 +87034,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "service",
                   ["https://www.w3.org/ns/did#service"],
                   options.contextLoader ?? this._contextLoader ??
@@ -87112,6 +87213,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "service",
                     ["https://www.w3.org/ns/did#service"],
                     options.contextLoader ?? this._contextLoader ??
@@ -92326,6 +92428,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "quote",
                   ["https://w3id.org/fep/044f#quote"],
                   options.contextLoader ?? this._contextLoader ??
@@ -92783,6 +92886,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "quoteAuthorization",
                   ["https://w3id.org/fep/044f#quoteAuthorization"],
                   options.contextLoader ?? this._contextLoader ??
@@ -97012,6 +97116,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "partOf",
                   ["https://www.w3.org/ns/activitystreams#partOf"],
                   options.contextLoader ?? this._contextLoader ??
@@ -97444,6 +97549,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "next",
                   ["https://www.w3.org/ns/activitystreams#next"],
                   options.contextLoader ?? this._contextLoader ??
@@ -97877,6 +97983,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "prev",
                   ["https://www.w3.org/ns/activitystreams#prev"],
                   options.contextLoader ?? this._contextLoader ??
@@ -106998,6 +107105,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "publicKey",
                   ["https://w3id.org/security#publicKey"],
                   options.contextLoader ?? this._contextLoader ??
@@ -107172,6 +107280,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "publicKey",
                     ["https://w3id.org/security#publicKey"],
                     options.contextLoader ?? this._contextLoader ??
@@ -107609,6 +107718,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "assertionMethod",
                   ["https://w3id.org/security#assertionMethod"],
                   options.contextLoader ?? this._contextLoader ??
@@ -107787,6 +107897,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "assertionMethod",
                     ["https://w3id.org/security#assertionMethod"],
                     options.contextLoader ?? this._contextLoader ??
@@ -108294,6 +108405,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "inbox",
                   ["http://www.w3.org/ns/ldp#inbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -108751,6 +108863,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "outbox",
                   ["https://www.w3.org/ns/activitystreams#outbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -109188,6 +109301,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "following",
                   ["https://www.w3.org/ns/activitystreams#following"],
                   options.contextLoader ?? this._contextLoader ??
@@ -109628,6 +109742,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "followers",
                   ["https://www.w3.org/ns/activitystreams#followers"],
                   options.contextLoader ?? this._contextLoader ??
@@ -110066,6 +110181,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "liked",
                   ["https://www.w3.org/ns/activitystreams#liked"],
                   options.contextLoader ?? this._contextLoader ??
@@ -110502,6 +110618,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featured",
                   ["http://joinmastodon.org/ns#featured"],
                   options.contextLoader ?? this._contextLoader ??
@@ -110938,6 +111055,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredTags",
                   ["http://joinmastodon.org/ns#featuredTags"],
                   options.contextLoader ?? this._contextLoader ??
@@ -111371,6 +111489,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredCollections",
                   ["https://w3id.org/fep/7aa9#featuredCollections"],
                   options.contextLoader ?? this._contextLoader ??
@@ -111808,6 +111927,7 @@ get gateways(): (URL)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "streams",
                     ["https://www.w3.org/ns/activitystreams#streams"],
                     options.contextLoader ?? this._contextLoader ??
@@ -112387,6 +112507,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "movedTo",
                   ["https://www.w3.org/ns/activitystreams#movedTo"],
                   options.contextLoader ?? this._contextLoader ??
@@ -112883,6 +113004,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "alsoKnownAs",
                   ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                   options.contextLoader ?? this._contextLoader ??
@@ -113061,6 +113183,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "alsoKnownAs",
                     ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                     options.contextLoader ?? this._contextLoader ??
@@ -113498,6 +113621,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "service",
                   ["https://www.w3.org/ns/did#service"],
                   options.contextLoader ?? this._contextLoader ??
@@ -113676,6 +113800,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "service",
                     ["https://www.w3.org/ns/did#service"],
                     options.contextLoader ?? this._contextLoader ??
@@ -118746,6 +118871,7 @@ get names(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "preview",
                     ["https://www.w3.org/ns/activitystreams#preview"],
                     options.contextLoader ?? this._contextLoader ??
@@ -126207,6 +126333,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "quote",
                   ["https://w3id.org/fep/044f#quote"],
                   options.contextLoader ?? this._contextLoader ??
@@ -126664,6 +126791,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "quoteAuthorization",
                   ["https://w3id.org/fep/044f#quoteAuthorization"],
                   options.contextLoader ?? this._contextLoader ??
@@ -128205,6 +128333,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "orderedItems",
                     ["https://www.w3.org/ns/activitystreams#items"],
                     options.contextLoader ?? this._contextLoader ??
@@ -132131,6 +132260,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "publicKey",
                   ["https://w3id.org/security#publicKey"],
                   options.contextLoader ?? this._contextLoader ??
@@ -132305,6 +132435,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "publicKey",
                     ["https://w3id.org/security#publicKey"],
                     options.contextLoader ?? this._contextLoader ??
@@ -132742,6 +132873,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "assertionMethod",
                   ["https://w3id.org/security#assertionMethod"],
                   options.contextLoader ?? this._contextLoader ??
@@ -132920,6 +133052,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "assertionMethod",
                     ["https://w3id.org/security#assertionMethod"],
                     options.contextLoader ?? this._contextLoader ??
@@ -133427,6 +133560,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "inbox",
                   ["http://www.w3.org/ns/ldp#inbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -133884,6 +134018,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "outbox",
                   ["https://www.w3.org/ns/activitystreams#outbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -134321,6 +134456,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "following",
                   ["https://www.w3.org/ns/activitystreams#following"],
                   options.contextLoader ?? this._contextLoader ??
@@ -134761,6 +134897,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "followers",
                   ["https://www.w3.org/ns/activitystreams#followers"],
                   options.contextLoader ?? this._contextLoader ??
@@ -135199,6 +135336,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "liked",
                   ["https://www.w3.org/ns/activitystreams#liked"],
                   options.contextLoader ?? this._contextLoader ??
@@ -135635,6 +135773,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featured",
                   ["http://joinmastodon.org/ns#featured"],
                   options.contextLoader ?? this._contextLoader ??
@@ -136071,6 +136210,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredTags",
                   ["http://joinmastodon.org/ns#featuredTags"],
                   options.contextLoader ?? this._contextLoader ??
@@ -136504,6 +136644,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredCollections",
                   ["https://w3id.org/fep/7aa9#featuredCollections"],
                   options.contextLoader ?? this._contextLoader ??
@@ -136941,6 +137082,7 @@ get gateways(): (URL)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "streams",
                     ["https://www.w3.org/ns/activitystreams#streams"],
                     options.contextLoader ?? this._contextLoader ??
@@ -137520,6 +137662,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "movedTo",
                   ["https://www.w3.org/ns/activitystreams#movedTo"],
                   options.contextLoader ?? this._contextLoader ??
@@ -138016,6 +138159,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "alsoKnownAs",
                   ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                   options.contextLoader ?? this._contextLoader ??
@@ -138194,6 +138338,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "alsoKnownAs",
                     ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                     options.contextLoader ?? this._contextLoader ??
@@ -138631,6 +138776,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "service",
                   ["https://www.w3.org/ns/did#service"],
                   options.contextLoader ?? this._contextLoader ??
@@ -138809,6 +138955,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "service",
                     ["https://www.w3.org/ns/did#service"],
                     options.contextLoader ?? this._contextLoader ??
@@ -145928,6 +146075,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "publicKey",
                   ["https://w3id.org/security#publicKey"],
                   options.contextLoader ?? this._contextLoader ??
@@ -146102,6 +146250,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "publicKey",
                     ["https://w3id.org/security#publicKey"],
                     options.contextLoader ?? this._contextLoader ??
@@ -146539,6 +146688,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "assertionMethod",
                   ["https://w3id.org/security#assertionMethod"],
                   options.contextLoader ?? this._contextLoader ??
@@ -146717,6 +146867,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "assertionMethod",
                     ["https://w3id.org/security#assertionMethod"],
                     options.contextLoader ?? this._contextLoader ??
@@ -147224,6 +147375,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "inbox",
                   ["http://www.w3.org/ns/ldp#inbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -147681,6 +147833,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "outbox",
                   ["https://www.w3.org/ns/activitystreams#outbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -148118,6 +148271,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "following",
                   ["https://www.w3.org/ns/activitystreams#following"],
                   options.contextLoader ?? this._contextLoader ??
@@ -148558,6 +148712,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "followers",
                   ["https://www.w3.org/ns/activitystreams#followers"],
                   options.contextLoader ?? this._contextLoader ??
@@ -148996,6 +149151,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "liked",
                   ["https://www.w3.org/ns/activitystreams#liked"],
                   options.contextLoader ?? this._contextLoader ??
@@ -149432,6 +149588,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featured",
                   ["http://joinmastodon.org/ns#featured"],
                   options.contextLoader ?? this._contextLoader ??
@@ -149868,6 +150025,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredTags",
                   ["http://joinmastodon.org/ns#featuredTags"],
                   options.contextLoader ?? this._contextLoader ??
@@ -150301,6 +150459,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredCollections",
                   ["https://w3id.org/fep/7aa9#featuredCollections"],
                   options.contextLoader ?? this._contextLoader ??
@@ -150738,6 +150897,7 @@ get gateways(): (URL)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "streams",
                     ["https://www.w3.org/ns/activitystreams#streams"],
                     options.contextLoader ?? this._contextLoader ??
@@ -151317,6 +151477,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "movedTo",
                   ["https://www.w3.org/ns/activitystreams#movedTo"],
                   options.contextLoader ?? this._contextLoader ??
@@ -151813,6 +151974,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "alsoKnownAs",
                   ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                   options.contextLoader ?? this._contextLoader ??
@@ -151991,6 +152153,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "alsoKnownAs",
                     ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                     options.contextLoader ?? this._contextLoader ??
@@ -152428,6 +152591,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "service",
                   ["https://www.w3.org/ns/did#service"],
                   options.contextLoader ?? this._contextLoader ??
@@ -152606,6 +152770,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "service",
                     ["https://www.w3.org/ns/did#service"],
                     options.contextLoader ?? this._contextLoader ??
@@ -158116,6 +158281,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "describes",
                   ["https://www.w3.org/ns/activitystreams#describes"],
                   options.contextLoader ?? this._contextLoader ??
@@ -159892,6 +160058,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "oneOf",
                     ["https://www.w3.org/ns/activitystreams#oneOf"],
                     options.contextLoader ?? this._contextLoader ??
@@ -160332,6 +160499,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "anyOf",
                     ["https://www.w3.org/ns/activitystreams#anyOf"],
                     options.contextLoader ?? this._contextLoader ??
@@ -160798,6 +160966,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "quote",
                   ["https://w3id.org/fep/044f#quote"],
                   options.contextLoader ?? this._contextLoader ??
@@ -161255,6 +161424,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "quoteAuthorization",
                   ["https://w3id.org/fep/044f#quoteAuthorization"],
                   options.contextLoader ?? this._contextLoader ??
@@ -164373,6 +164543,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "subject",
                   ["https://www.w3.org/ns/activitystreams#subject"],
                   options.contextLoader ?? this._contextLoader ??
@@ -164806,6 +164977,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "object",
                   ["https://www.w3.org/ns/activitystreams#object"],
                   options.contextLoader ?? this._contextLoader ??
@@ -164981,6 +165153,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "object",
                     ["https://www.w3.org/ns/activitystreams#object"],
                     options.contextLoader ?? this._contextLoader ??
@@ -165417,6 +165590,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "relationship",
                   ["https://www.w3.org/ns/activitystreams#relationship"],
                   options.contextLoader ?? this._contextLoader ??
@@ -165594,6 +165768,7 @@ rawPropertyDescriptors.set(this.prototype, descriptors);
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "relationship",
                     ["https://www.w3.org/ns/activitystreams#relationship"],
                     options.contextLoader ?? this._contextLoader ??
@@ -170167,6 +170342,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "publicKey",
                   ["https://w3id.org/security#publicKey"],
                   options.contextLoader ?? this._contextLoader ??
@@ -170341,6 +170517,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "publicKey",
                     ["https://w3id.org/security#publicKey"],
                     options.contextLoader ?? this._contextLoader ??
@@ -170778,6 +170955,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "assertionMethod",
                   ["https://w3id.org/security#assertionMethod"],
                   options.contextLoader ?? this._contextLoader ??
@@ -170956,6 +171134,7 @@ get preferredUsernames(): ((string | LanguageString))[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "assertionMethod",
                     ["https://w3id.org/security#assertionMethod"],
                     options.contextLoader ?? this._contextLoader ??
@@ -171463,6 +171642,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "inbox",
                   ["http://www.w3.org/ns/ldp#inbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -171920,6 +172100,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "outbox",
                   ["https://www.w3.org/ns/activitystreams#outbox"],
                   options.contextLoader ?? this._contextLoader ??
@@ -172357,6 +172538,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "following",
                   ["https://www.w3.org/ns/activitystreams#following"],
                   options.contextLoader ?? this._contextLoader ??
@@ -172797,6 +172979,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "followers",
                   ["https://www.w3.org/ns/activitystreams#followers"],
                   options.contextLoader ?? this._contextLoader ??
@@ -173235,6 +173418,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "liked",
                   ["https://www.w3.org/ns/activitystreams#liked"],
                   options.contextLoader ?? this._contextLoader ??
@@ -173671,6 +173855,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featured",
                   ["http://joinmastodon.org/ns#featured"],
                   options.contextLoader ?? this._contextLoader ??
@@ -174107,6 +174292,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredTags",
                   ["http://joinmastodon.org/ns#featuredTags"],
                   options.contextLoader ?? this._contextLoader ??
@@ -174540,6 +174726,7 @@ get gateways(): (URL)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "featuredCollections",
                   ["https://w3id.org/fep/7aa9#featuredCollections"],
                   options.contextLoader ?? this._contextLoader ??
@@ -174977,6 +175164,7 @@ get gateways(): (URL)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "streams",
                     ["https://www.w3.org/ns/activitystreams#streams"],
                     options.contextLoader ?? this._contextLoader ??
@@ -175556,6 +175744,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "movedTo",
                   ["https://www.w3.org/ns/activitystreams#movedTo"],
                   options.contextLoader ?? this._contextLoader ??
@@ -176052,6 +176241,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "alsoKnownAs",
                   ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                   options.contextLoader ?? this._contextLoader ??
@@ -176230,6 +176420,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "alsoKnownAs",
                     ["https://www.w3.org/ns/activitystreams#alsoKnownAs"],
                     options.contextLoader ?? this._contextLoader ??
@@ -176667,6 +176858,7 @@ get attributionDomains(): (string)[] {
               if (
                 await isCachedPropertyKey(
                   this._cachedJsonLd as Record<string, unknown>,
+                  doc,
                   "service",
                   ["https://www.w3.org/ns/did#service"],
                   options.contextLoader ?? this._contextLoader ??
@@ -176845,6 +177037,7 @@ get attributionDomains(): (string)[] {
                 if (
                   await isCachedPropertyKey(
                     this._cachedJsonLd as Record<string, unknown>,
+                    obj,
                     "service",
                     ["https://www.w3.org/ns/did#service"],
                     options.contextLoader ?? this._contextLoader ??
